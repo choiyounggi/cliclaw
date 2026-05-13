@@ -9,7 +9,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/choiyounggi/cliclaw.git"
+    "url": "git+https://github.com/choiyounggi/cliclaw.git"
   },
   "homepage": "https://github.com/choiyounggi/cliclaw#readme",
   "bugs": "https://github.com/choiyounggi/cliclaw/issues",
@@ -24,7 +24,7 @@
     "ai"
   ],
   "bin": {
-    "cliclaw": "./bin/cliclaw"
+    "cliclaw": "bin/cliclaw"
   },
   "files": [
     "bin/",
