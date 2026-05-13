@@ -1,0 +1,35 @@
+{
+  "token": "PASTE_YOUR_BOT_TOKEN_FROM_BOTFATHER",
+  "allowedUserIds": [],
+  "cwd": "./workspace",
+  "defaultAgent": "claude",
+  "agents": {
+    "claude": {
+      "path": "",
+      "model": "sonnet",
+      "maxTurns": 100
+    },
+    "codex": {
+      "path": "",
+      "model": null,
+      "sandbox": "workspace-write",
+      "maxTurns": 50
+    },
+    "pi": {
+      "path": "",
+      "model": null,
+      "provider": null,
+      "maxTurns": 50
+    }
+  },
+  "sessionTimeoutMs": 1800000,
+  "pollTimeoutSec": 30,
+  "logLevel": "info",
+  "confirmGate": {
+    "enabled": true,
+    "pendingTimeoutMs": 300000
+  },
+  "streaming": {
+    "enabled": true
+  }
+}

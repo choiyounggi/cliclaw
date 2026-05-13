@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Sample launchd LaunchAgent for cliclaw.
+
+  USAGE
+  =====
+  1. Replace every occurrence of __USERNAME__ with your macOS login name
+     (e.g. `alice`). Both the Label and the path-prefixes must agree.
+  2. Replace __BUN_PATH__ with the absolute path to your `bun` binary
+     (`which bun`).
+  3. Replace __CLICLAW_DIR__ with the absolute path to this cliclaw checkout
+     (e.g. `/Users/alice/cliclaw`).
+  4. If you sit behind a corporate TLS-inspecting proxy (Zscaler etc.),
+     uncomment the NODE_EXTRA_CA_CERTS entry and point it at the bundled CA.
+     Otherwise leave it commented.
+  5. Copy this file to ~/Library/LaunchAgents/com.__USERNAME__.cliclaw.plist
+     and load it:
+
+       launchctl load  ~/Library/LaunchAgents/com.__USERNAME__.cliclaw.plist
+       launchctl start com.__USERNAME__.cliclaw
+       tail -f __CLICLAW_DIR__/logs/bot.log
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.__USERNAME__.cliclaw</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__BUN_PATH__</string>
+        <string>run</string>
+        <string>__CLICLAW_DIR__/bot.ts</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__CLICLAW_DIR__</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>HOME</key>
+        <string>/Users/__USERNAME__</string>
+        <!--
+        <key>NODE_EXTRA_CA_CERTS</key>
+        <string>/path/to/corporate-root-ca.pem</string>
+        -->
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+        <key>Crashed</key>
+        <true/>
+    </dict>
+
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>StandardOutPath</key>
+    <string>__CLICLAW_DIR__/logs/bot.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>__CLICLAW_DIR__/logs/bot.err</string>
+</dict>
+</plist>

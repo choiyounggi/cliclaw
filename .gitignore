@@ -1,0 +1,19 @@
+# Secrets and runtime state — must never be committed.
+config.json
+sessions.json
+sessions/
+.sock/
+
+# Runtime artifacts
+logs/
+workspace/
+node_modules/
+bun.lock
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+
+# Local Claude harness scratch
+.claude/tmp/
