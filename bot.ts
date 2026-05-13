@@ -428,11 +428,16 @@ async function runClaude(
   stream: StreamingMessage | null,
 ): Promise<AgentResult> {
   const c = config.agents.claude;
+  // bypassPermissions: headless 모드에서 권한 ask 프롬프트는 자동 거절로
+  // 끝나 사용자 응답을 받을 수 없다. Bash 도구는 PreToolUse confirm 훅이
+  // 텔레그램으로 다시 묻고, 그 외 도구(WebFetch 등)는 allowedUserIds로
+  // 차단된 단일 채널이라는 봇 신뢰 경계에 위임한다.
   const args = [
     "-p", prompt,
     "--output-format", "stream-json",
     "--verbose",
     "--model", c.model,
+    "--permission-mode", "bypassPermissions",
   ];
   if (stream && claudePartialMessages) args.push("--include-partial-messages");
   // --continue resumes the most-recent session in cwd. More robust than
