@@ -19,11 +19,13 @@
 
 ```bash
 # Bun (권장)
-bun add -g cliclaw
+bun add -g @younggichoi/cliclaw
 
 # 또는 npm
-npm install -g cliclaw
+npm install -g @younggichoi/cliclaw
 ```
+
+> 패키지는 scoped name(`@younggichoi/cliclaw`)로 publish되지만, 설치 후 명령어는 그대로 **`cliclaw`** 입니다.
 
 ### 3. 인터랙티브 셋업
 

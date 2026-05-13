@@ -1,6 +1,9 @@
 {
-  "name": "cliclaw",
+  "name": "@younggichoi/cliclaw",
   "version": "0.5.0",
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
   "description": "Telegram bridge for local coding CLIs (Claude Code, Codex, Pi) with per-chat sessions, confirm gate, streaming, and image attachments.",
   "license": "MIT",
