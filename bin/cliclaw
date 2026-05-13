@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# cliclaw — npm/bun-installable CLI shim.
+#
+# Globally-installed Node packages can't rely on a Bun shebang on their .ts
+# entry point because npm symlinks the bin into PATH and POSIX shells need a
+# real executable. This wrapper:
+#   1. Confirms `bun` is on PATH (or falls back to a known install path).
+#   2. Exec's the TypeScript entry point through Bun.
+#
+# If `bun` is missing, print install instructions instead of a cryptic
+# "command not found".
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PKG_DIR="$(dirname "$SCRIPT_DIR")"
+CLI_TS="$PKG_DIR/cli.ts"
+
+if [ ! -f "$CLI_TS" ]; then
+    echo "cliclaw: cannot find cli.ts at $CLI_TS" >&2
+    exit 1
+fi
+
+BUN_BIN=""
+if command -v bun >/dev/null 2>&1; then
+    BUN_BIN="$(command -v bun)"
+elif [ -x "$HOME/.bun/bin/bun" ]; then
+    BUN_BIN="$HOME/.bun/bin/bun"
+elif [ -x "/opt/homebrew/bin/bun" ]; then
+    BUN_BIN="/opt/homebrew/bin/bun"
+elif [ -x "/usr/local/bin/bun" ]; then
+    BUN_BIN="/usr/local/bin/bun"
+fi
+
+if [ -z "$BUN_BIN" ]; then
+    cat >&2 <<'EOF'
+cliclaw requires the Bun runtime.
+
+Install Bun:
+    curl -fsSL https://bun.sh/install | bash
+
+Then re-run your command.
+EOF
+    exit 1
+fi
+
+exec "$BUN_BIN" run "$CLI_TS" "$@"

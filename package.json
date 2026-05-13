@@ -1,16 +1,46 @@
 {
   "name": "cliclaw",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "type": "module",
-  "private": true,
-  "description": "Telegram bridge for local coding CLIs (Claude Code, Codex, Pi) with per-chat sessions, confirm gate, streaming, image attachments.",
+  "description": "Telegram bridge for local coding CLIs (Claude Code, Codex, Pi) with per-chat sessions, confirm gate, streaming, and image attachments.",
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "https://github.com/choiyounggi/cliclaw.git"
   },
+  "homepage": "https://github.com/choiyounggi/cliclaw#readme",
+  "bugs": "https://github.com/choiyounggi/cliclaw/issues",
+  "keywords": [
+    "telegram",
+    "claude",
+    "claude-code",
+    "codex",
+    "pi",
+    "bot",
+    "agent",
+    "ai"
+  ],
+  "bin": {
+    "cliclaw": "./bin/cliclaw"
+  },
+  "files": [
+    "bin/",
+    "lib/",
+    "samples/",
+    "bot.ts",
+    "cli.ts",
+    "tsconfig.json",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "bun": ">=1.0.0"
+  },
+  "os": [
+    "darwin"
+  ],
   "scripts": {
-    "start": "bun run bot.ts",
+    "start": "bun run cli.ts start",
     "dev": "bun run --hot bot.ts",
     "test": "bun --bun x vitest run",
     "test:watch": "bun --bun x vitest"

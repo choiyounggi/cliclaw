@@ -120,16 +120,26 @@ interface AgentResult {
 }
 
 // ---------- paths ----------
+// ROOT = where the bot source lives (npm/bun global install location, or a
+// local checkout). HOOK_SCRIPT must live next to the source because Claude/
+// Codex spawn it via PreToolUse hook.
+// HOME = where this user's runtime state lives (config, sessions, logs,
+// sockets, workspace). Defaults to ~/.cliclaw; override with $CLICLAW_HOME.
+// Splitting these lets multiple users on one machine share one global
+// install while keeping per-user state isolated.
 const ROOT = dirname(Bun.fileURLToPath(import.meta.url));
-const CONFIG_FILE = join(ROOT, "config.json");
-const SESSIONS_FILE = join(ROOT, "sessions.json");
-const LOG_FILE = join(ROOT, "logs", "bot.log");
-const AUDIT_FILE = join(ROOT, "logs", "audit.jsonl");
-const SESSION_ROOT = join(ROOT, "sessions");
+const HOME = process.env.CLICLAW_HOME
+  ? resolvePath(process.env.CLICLAW_HOME)
+  : join(homedir(), ".cliclaw");
+const CONFIG_FILE = join(HOME, "config.json");
+const SESSIONS_FILE = join(HOME, "sessions.json");
+const LOG_FILE = join(HOME, "logs", "bot.log");
+const AUDIT_FILE = join(HOME, "logs", "audit.jsonl");
+const SESSION_ROOT = join(HOME, "sessions");
 const HOOK_SCRIPT = resolvePath(ROOT, "bin/bash-confirm.ts");
-const SOCKET_PATH = join(ROOT, ".sock", "confirm.sock");
-const EXTRA_PATTERNS_FILE = join(ROOT, ".sock", "danger-patterns.json");
-const UPLOADS_ROOT = join(ROOT, "workspace", "uploads");
+const SOCKET_PATH = join(HOME, ".sock", "confirm.sock");
+const EXTRA_PATTERNS_FILE = join(HOME, ".sock", "danger-patterns.json");
+const UPLOADS_ROOT = join(HOME, "workspace", "uploads");
 
 mkdirSync(dirname(LOG_FILE), { recursive: true });
 mkdirSync(SESSION_ROOT, { recursive: true });
@@ -170,9 +180,9 @@ if (!AGENT_NAMES.includes(config.defaultAgent)) {
   console.error(`config.json: defaultAgent must be one of ${AGENT_NAMES.join(",")}`);
   process.exit(1);
 }
-// Resolve a relative cwd against the bot directory so launchctl / cron /
-// arbitrary working directories all yield the same workspace path.
-config.cwd = resolvePath(ROOT, config.cwd);
+// Resolve a relative cwd against the user's CLICLAW_HOME so launchctl /
+// cron / arbitrary working directories all yield the same workspace path.
+config.cwd = resolvePath(HOME, config.cwd);
 mkdirSync(config.cwd, { recursive: true });
 
 const confirmGateEnabled = config.confirmGate?.enabled !== false; // default ON
