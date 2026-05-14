@@ -167,6 +167,22 @@ if (!config.token || config.token.startsWith("PASTE_")) {
 // killing the bot — users routinely pick a subset (claude only, or claude +
 // codex without pi, etc.) and earlier versions refused to start in that case.
 {
+  // A config.json written by an older cliclaw (before a given agent
+  // existed) won't have that agent's entry at all. Auto-create a minimal
+  // placeholder so the resolver + later config.agents[a].path = ...
+  // assignment don't crash with "undefined is not an object". Defaults
+  // mirror config.example.json shape; the user is free to edit them.
+  const defaultAgentEntries: Record<Agent, () => Record<string, unknown>> = {
+    claude: () => ({ path: "", model: "sonnet", maxTurns: 100 }),
+    codex:  () => ({ path: "", model: null, sandbox: "workspace-write", maxTurns: 50 }),
+    pi:     () => ({ path: "", model: null, provider: null, maxTurns: 50 }),
+    gemini: () => ({ path: "", model: null, approvalMode: "yolo", maxTurns: 50 }),
+  };
+  const agents = config.agents as unknown as Record<Agent, unknown>;
+  for (const a of ALL_AGENTS) {
+    if (!agents[a]) agents[a] = defaultAgentEntries[a]();
+  }
+
   const usable: Agent[] = [];
   for (const a of AGENT_NAMES) {
     const p = config.agents[a]?.path;
