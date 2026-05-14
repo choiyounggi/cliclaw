@@ -20,6 +20,12 @@
       "model": null,
       "provider": null,
       "maxTurns": 50
+    },
+    "gemini": {
+      "path": "",
+      "model": null,
+      "approvalMode": "yolo",
+      "maxTurns": 50
     }
   },
   "sessionTimeoutMs": 1800000,

@@ -19,7 +19,7 @@ import { stdin, stdout } from "node:process";
 import { resolveCliPath, type SupportedCli } from "./resolve-cli-path.ts";
 import * as launchd from "./launchd.ts";
 
-const AGENTS: SupportedCli[] = ["claude", "codex", "pi"];
+const AGENTS: SupportedCli[] = ["claude", "codex", "pi", "gemini"];
 const TELEGRAM_API = "https://api.telegram.org";
 
 export interface SetupOptions {
@@ -352,6 +352,12 @@ function writeConfig(home: string, args: WriteConfigArgs): void {
         model: existing.agents?.pi?.model ?? null,
         provider: existing.agents?.pi?.provider ?? null,
         maxTurns: existing.agents?.pi?.maxTurns ?? 50,
+      },
+      gemini: {
+        path: args.detected.gemini?.path ?? "",
+        model: existing.agents?.gemini?.model ?? null,
+        approvalMode: existing.agents?.gemini?.approvalMode ?? "yolo",
+        maxTurns: existing.agents?.gemini?.maxTurns ?? 50,
       },
     },
     sessionTimeoutMs: existing.sessionTimeoutMs ?? 1_800_000,

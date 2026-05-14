@@ -125,7 +125,7 @@ function cmdDoctor(): void {
   console.log(`  bun:              ${BUN_PATH}`);
   console.log(`  config.json:      ${existsSync(join(HOME, "config.json")) ? "OK" : "missing"}`);
   console.log(`  agents:`);
-  for (const a of ["claude", "codex", "pi"] as const) {
+  for (const a of ["claude", "codex", "pi", "gemini"] as const) {
     const p = resolveCliPath(a);
     console.log(`    ${a.padEnd(7)} ${p ?? "not found"}`);
   }

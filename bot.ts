@@ -32,17 +32,18 @@ import { downloadTelegramFile, inferExtension, makeMediaPath } from "./lib/media
 import { resolveCliPath } from "./lib/resolve-cli-path.ts";
 
 // ---------- types ----------
-type Agent = "claude" | "codex" | "pi";
+type Agent = "claude" | "codex" | "pi" | "gemini";
 // All agents this bot knows how to drive. Populated at boot from ALL_AGENTS
 // minus any whose CLI we cannot locate — see the install detection block
 // further down. Code that needs to know which agents are *actually* usable
 // in this process should read AGENT_NAMES.
-const ALL_AGENTS = ["claude", "codex", "pi"] as const;
+const ALL_AGENTS = ["claude", "codex", "pi", "gemini"] as const;
 let AGENT_NAMES: Agent[] = [...ALL_AGENTS];
 
 interface ClaudeAgentConfig { path: string; model: string; maxTurns?: number; timeoutMs?: number; idleTimeoutMs?: number; }
 interface CodexAgentConfig  { path: string; model: string | null; sandbox: "read-only" | "workspace-write" | "danger-full-access"; maxTurns?: number; timeoutMs?: number; idleTimeoutMs?: number; }
 interface PiAgentConfig     { path: string; model: string | null; provider: string | null; maxTurns?: number; timeoutMs?: number; idleTimeoutMs?: number; }
+interface GeminiAgentConfig { path: string; model: string | null; approvalMode?: "default" | "auto_edit" | "yolo" | "plan"; maxTurns?: number; timeoutMs?: number; idleTimeoutMs?: number; }
 
 interface ConfirmGateConfig {
   enabled?: boolean;
@@ -69,6 +70,7 @@ interface Config {
     claude: ClaudeAgentConfig;
     codex: CodexAgentConfig;
     pi: PiAgentConfig;
+    gemini: GeminiAgentConfig;
   };
   sessionTimeoutMs: number;
   /** Default idle (no-stdout) timeout applied to all agents unless overridden. ms. */
@@ -802,6 +804,65 @@ async function runPi(
   return { sessionId: null, text, error: null };
 }
 
+// ---------- gemini adapter ----------
+async function runGemini(
+  prompt: string,
+  chatId: number,
+  session: AgentSession | undefined,
+  abort: AbortSignal,
+  onProgress: (text: string) => void,
+): Promise<AgentResult> {
+  const c = config.agents.gemini;
+  // Per-chat cwd so each chat has its own `~/.gemini/<project>/sessions/`
+  // entry — Gemini stores session state keyed by working directory, so
+  // running every chat from `config.cwd` would have them all stomp the
+  // same "latest" session.
+  const sessionDir = agentSessionDir("gemini", chatId);
+  // Approval mode default = yolo. Gemini doesn't currently integrate with
+  // our bash-confirm IPC hook (only Claude/Codex do), so the gate sitting
+  // in front of dangerous Bash commands is the user's host-level guard +
+  // allowedUserIds. Users who want narrower autonomy can set
+  // `agents.gemini.approvalMode` to "auto_edit" or "default".
+  const approval = c.approvalMode ?? "yolo";
+  const args = [
+    "-p", prompt,
+    "--approval-mode", approval,
+    "-o", "text",
+  ];
+  if (c.model) args.push("-m", c.model);
+  if (session && session.turnCount > 0) args.push("-r", "latest");
+
+  log("debug", `gemini args: --approval-mode ${approval} ${session && session.turnCount > 0 ? "-r latest" : "(new)"} model=${c.model ?? "default"}`);
+
+  const onLine = (line: string): void => {
+    const indicator = detectProgressLine(line);
+    if (indicator) {
+      audit.write({ chatId, type: "tool_use", agent: "gemini", data: { brief: indicator } });
+      onProgress(`🔧 ${indicator}`);
+    }
+  };
+
+  const timeoutMs = agentTimeoutMs("gemini");
+  const idleTimeoutMs = agentIdleTimeoutMs("gemini");
+  const { exitCode, stdout, stderr, killedReason } = await runSubprocessStream(c.path, args, {
+    cwd: sessionDir,
+    timeoutMs,
+    idleTimeoutMs,
+    signal: abort,
+    onStdoutLine: onLine,
+  });
+
+  if (killedReason === "abort") return { sessionId: null, text: "", error: "사용자가 중지함" };
+  if (killedReason === "timeout") return { sessionId: null, text: "", error: `타임아웃 (${timeoutMs}ms 초과)` };
+  if (killedReason === "idle") return { sessionId: null, text: "", error: `무활동 타임아웃 (${idleTimeoutMs}ms)` };
+
+  const text = stripAnsi(stdout).trim();
+  if (exitCode !== 0) {
+    return { sessionId: null, text: "", error: (stripAnsi(stderr).trim() || text).slice(0, 4000) };
+  }
+  return { sessionId: null, text, error: null };
+}
+
 // ---------- dispatcher ----------
 async function runAgent(
   agent: Agent,
@@ -815,6 +876,7 @@ async function runAgent(
   if (agent === "claude") return runClaude(prompt, session, chatId, abort, onProgress, stream);
   if (agent === "codex")  return runCodex(prompt, chatId, session, abort, onProgress);
   if (agent === "pi")     return runPi(prompt, chatId, session, abort, onProgress);
+  if (agent === "gemini") return runGemini(prompt, chatId, session, abort, onProgress);
   throw new Error(`unknown agent: ${agent}`);
 }
 
@@ -895,9 +957,10 @@ async function handleSafetyCommand(chatId: number, arg: string): Promise<void> {
 
 function helpText(active: Agent): string {
   const labels: Record<Agent, string> = {
-    claude: "  /claude — Anthropic Claude Code",
-    codex:  "  /codex  — OpenAI Codex",
-    pi:     "  /pi     — Pi Coding Agent",
+    claude: "  /claude  — Anthropic Claude Code",
+    codex:  "  /codex   — OpenAI Codex",
+    pi:     "  /pi      — Pi Coding Agent",
+    gemini: "  /gemini  — Google Gemini CLI",
   };
   const switchLines = AGENT_NAMES.map((a) => labels[a]);
   return [

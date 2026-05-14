@@ -27,7 +27,7 @@ import { execFileSync } from "node:child_process";
 const LOGIN_SHELL_TIMEOUT_MS = 3000;
 const WHICH_SENTINEL = "__WHICH__=";
 
-export type SupportedCli = "claude" | "codex" | "pi";
+export type SupportedCli = "claude" | "codex" | "pi" | "gemini";
 
 /** Per-process cache so repeated lookups (startup + reload) stay cheap. */
 const resolveCache = new Map<string, string>();
@@ -69,6 +69,12 @@ function wellKnownCandidates(cmd: SupportedCli): string[] {
         join(home, ".local/bin/pi"),
         "/usr/local/bin/pi",
         "/opt/homebrew/bin/pi",
+      ];
+    case "gemini":
+      return [
+        join(home, ".local/bin/gemini"),
+        "/usr/local/bin/gemini",
+        "/opt/homebrew/bin/gemini",
       ];
   }
 }

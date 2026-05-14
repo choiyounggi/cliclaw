@@ -65,7 +65,7 @@ export function printBanner(metaUrl: string): void {
   process.stdout.write("\n");
   process.stdout.write(
     `  ${BOLD}Telegram bridge for local coding CLIs${RESET} ` +
-      `${DIM}— Claude Code · Codex · Pi${RESET}\n`,
+      `${DIM}— Claude Code · Codex · Pi · Gemini${RESET}\n`,
   );
   process.stdout.write(
     `  ${DIM}v${version}  ·  https://github.com/choiyounggi/cliclaw${RESET}\n\n`,

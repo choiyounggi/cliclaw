@@ -141,6 +141,18 @@ describe("pickNvmCandidate", () => {
     }
   });
 
+  it("locates gemini under nvm prefix", () => {
+    const dir = makeTmpDir("nvm-gemini");
+    try {
+      const bin = join(dir, "versions/node/v22.0.0/bin");
+      mkdirSync(bin, { recursive: true });
+      writeExec(join(bin, "gemini"));
+      expect(pickNvmCandidate(dir, "gemini")).toBe(join(bin, "gemini"));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("returns null when versions dir is missing", () => {
     const dir = makeTmpDir("nvm-empty");
     try {
