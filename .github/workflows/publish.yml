@@ -4,19 +4,19 @@
 # from a working branch cannot accidentally publish — Releases are an
 # explicit, reviewable artifact.
 #
-# Authentication uses npm Trusted Publishing (OIDC). No long-lived secret
-# is required — the workflow exchanges a short-lived GitHub-signed JWT for
-# an npm publish token at run time, so a leaked repo secret can't be used
-# to push malicious versions.
+# Authentication: a long-lived npm token stored in the repository secret
+# NPM_TOKEN. The token must have 2FA bypass enabled (Automation Classic
+# Token, or a Granular Access Token with "Bypass 2FA" checked) so the
+# workflow can publish without an interactive OTP prompt.
 #
-# One-time setup on the npm side:
-#   1. https://www.npmjs.com/package/@younggichoi/cliclaw/access
-#   2. "Trusted Publisher" → "GitHub Actions"
-#   3. Organization: choiyounggi
-#      Repository:   cliclaw
-#      Workflow:     publish.yml
-#      (Environment: leave blank)
-#   4. Save.
+# Trusted Publishing (OIDC) is the modern alternative — it removes the
+# need for a long-lived secret. To switch later:
+#   1. Register this workflow at:
+#      https://www.npmjs.com/package/@younggichoi/cliclaw/access
+#      (Trusted Publisher → GitHub Actions, workflow filename: publish.yml)
+#   2. Add `permissions: id-token: write` to this job
+#   3. Drop NODE_AUTH_TOKEN and the NPM_TOKEN secret
+#   4. Add `--provenance` to the publish command for an npm attestation badge
 
 name: Publish to npm
 
@@ -26,8 +26,6 @@ on:
 
 permissions:
   contents: read
-  # Required for OIDC token exchange with npm.
-  id-token: write
 
 jobs:
   publish:
@@ -38,11 +36,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node
+      - name: Setup Node + npm registry auth
         uses: actions/setup-node@v4
         with:
-          # npm 11.5+ is required for Trusted Publishing; node 22 ships with it.
-          node-version: "22"
+          node-version: "20"
           registry-url: "https://registry.npmjs.org"
 
       # Refuse to publish if the Release tag and package.json version disagree
@@ -59,9 +56,7 @@ jobs:
             exit 1
           fi
 
-      # --provenance generates an attestation that ties this published
-      # tarball to the GitHub commit + workflow it came from. npmjs.com
-      # shows a "Provenance" badge for the version and users can verify
-      # via `npm audit signatures` or sigstore.
       - name: Publish
-        run: npm publish --access public --provenance
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

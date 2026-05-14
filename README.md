@@ -225,18 +225,16 @@ gh release create "v$(node -p 'require(\"./package.json\").version')" \
 
 3번 시점에 `.github/workflows/publish.yml` 이 자동 실행되어 `npm publish --access public` 까지 끝냅니다. 워크플로는 release tag 이름과 `package.json` version 일치를 먼저 검증하므로, 두 값이 어긋나 있으면 publish하지 않고 fail합니다.
 
-**사전 등록 필요** (한 번만): npm **Trusted Publishing** 으로 OIDC 인증. 토큰 발급·관리 불필요, 만료 없음, 유출 위험 없음.
+**사전 등록 필요** (한 번만): repo Settings → Secrets and variables → Actions → **NPM_TOKEN** 에 2FA bypass 가능한 npm 토큰 등록.
 
-1. <https://www.npmjs.com/package/@younggichoi/cliclaw/access> 접속
-2. **"Trusted Publisher"** → **"GitHub Actions"** 추가
-3. 필드 입력:
-   - Organization: `choiyounggi`
-   - Repository: `cliclaw`
-   - Workflow filename: `publish.yml`
-   - Environment: (비워둠)
-4. Save.
+1. <https://www.npmjs.com/settings/younggichoi/tokens/new>
+2. Granular Access Token 또는 Classic **Automation** Token 발급 (2FA bypass 포함)
+3. 발급된 `npm_…` 토큰을 GitHub Actions secret `NPM_TOKEN` 으로 추가
 
-이후 모든 publish는 GitHub Actions OIDC 토큰으로 자동 인증. 추가로 `--provenance` 플래그로 npm 페이지에 "출처 검증" 마크가 표시됩니다.
+**보안 강화 옵션** (선택): npm Trusted Publishing(OIDC)으로 전환하면 토큰 자체가 불필요합니다.
+1. <https://www.npmjs.com/package/@younggichoi/cliclaw/access> 에서 Trusted Publisher → GitHub Actions 추가 (workflow filename: `publish.yml`)
+2. `.github/workflows/publish.yml` 에 `permissions: id-token: write` 추가 + `NODE_AUTH_TOKEN` 제거 + `--provenance` 플래그 추가
+3. 기존 NPM_TOKEN secret 삭제
 
 ## 라이선스
 
