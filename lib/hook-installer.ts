@@ -108,10 +108,68 @@ export function uninstallSafetyDeny(targetPath: string): void {
   writeFileSync(targetPath, merged);
 }
 
+/**
+ * Read + parse + validate a hook config JSON. On malformed JSON the
+ * raw file is backed up to `<path>.corrupt-<timestamp>` and an empty
+ * config is returned, so we never silently overwrite a manually-edited
+ * settings.json that the user might still be debugging.
+ *
+ * Validation rejects shapes that would crash the merge step (e.g. a
+ * `hooks` field that's a string or an array). Anything that passes is
+ * structurally a HookConfig — fields we don't recognize pass through.
+ */
 function readJsonSafe(path: string): HookConfig {
   if (!existsSync(path)) return {};
-  try { return JSON.parse(readFileSync(path, "utf8")) as HookConfig; }
+  let raw: string;
+  try { raw = readFileSync(path, "utf8"); }
   catch { return {}; }
+  let parsed: unknown;
+  try { parsed = JSON.parse(raw); }
+  catch {
+    // Corrupt JSON: preserve the original under a timestamped suffix
+    // so the user can inspect/recover, then start from a clean slate.
+    try { writeFileSync(`${path}.corrupt-${Date.now()}`, raw); }
+    catch { /* best effort */ }
+    return {};
+  }
+  if (!validateHookConfig(parsed)) return {};
+  return parsed as HookConfig;
+}
+
+/** Structural validation of a hook config object. Tolerates unknown
+ *  top-level keys (we re-serialize them on write) but rejects shapes
+ *  that would crash the merge code. */
+export function validateHookConfig(obj: unknown): obj is HookConfig {
+  if (obj === null || typeof obj !== "object" || Array.isArray(obj)) return false;
+  const c = obj as Record<string, unknown>;
+  if (c.hooks !== undefined) {
+    if (typeof c.hooks !== "object" || c.hooks === null || Array.isArray(c.hooks)) return false;
+    const h = c.hooks as Record<string, unknown>;
+    if (h.PreToolUse !== undefined) {
+      if (!Array.isArray(h.PreToolUse)) return false;
+      for (const entry of h.PreToolUse) {
+        if (!entry || typeof entry !== "object") return false;
+        const e = entry as Record<string, unknown>;
+        if (typeof e.matcher !== "string") return false;
+        if (!Array.isArray(e.hooks)) return false;
+        for (const hk of e.hooks) {
+          if (!hk || typeof hk !== "object") return false;
+          const hki = hk as Record<string, unknown>;
+          if (hki.type !== "command") return false;
+          if (typeof hki.command !== "string") return false;
+          if (hki.timeout !== undefined && typeof hki.timeout !== "number") return false;
+        }
+      }
+    }
+  }
+  if (c.permissions !== undefined) {
+    if (typeof c.permissions !== "object" || c.permissions === null || Array.isArray(c.permissions)) return false;
+    const p = c.permissions as Record<string, unknown>;
+    for (const k of ["allow", "ask", "deny"] as const) {
+      if (p[k] !== undefined && !Array.isArray(p[k])) return false;
+    }
+  }
+  return true;
 }
 
 /**
@@ -123,11 +181,9 @@ function readJsonSafe(path: string): HookConfig {
  * @returns merged JSON string ready to write.
  */
 export function mergeBashConfirmHook(existingPath: string, hookCommand: string): string {
-  let existing: HookConfig = {};
-  if (existsSync(existingPath)) {
-    try { existing = JSON.parse(readFileSync(existingPath, "utf8")); }
-    catch { existing = {}; }
-  }
+  // Route through the validated reader so a malformed settings.json
+  // gets backed up rather than silently obliterated.
+  const existing = readJsonSafe(existingPath);
   const cfg: HookConfig = { ...existing };
   cfg.hooks = { ...(cfg.hooks ?? {}) };
   const pre = [...(cfg.hooks.PreToolUse ?? [])];

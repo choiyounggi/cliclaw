@@ -191,3 +191,25 @@ describe("compileExtraPatterns", () => {
     expect(matchDanger("rm -rf /tmp/x", all)?.id).toBe("rm-rf");
   });
 });
+
+describe("DEFAULT_DANGER_PATTERNS — self-validation", () => {
+  for (const p of DEFAULT_DANGER_PATTERNS) {
+    if (p.match) {
+      for (const sample of p.match) {
+        it(`[${p.id}] must match: ${sample}`, () => {
+          expect(matchDanger(sample)?.id).toBe(p.id);
+        });
+      }
+    }
+    if (p.notMatch) {
+      for (const sample of p.notMatch) {
+        it(`[${p.id}] must NOT match: ${sample}`, () => {
+          const m = matchDanger(sample);
+          // Either no pattern matches, or a different pattern does — both ok.
+          expect(m?.id).not.toBe(p.id);
+        });
+      }
+    }
+  }
+});
+

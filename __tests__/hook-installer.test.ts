@@ -9,7 +9,9 @@ import {
   installSafetyDeny,
   uninstallSafetyDeny,
   SAFETY_DENY_PATTERNS,
+  validateHookConfig,
 } from "../lib/hook-installer.ts";
+import { readdirSync } from "node:fs";
 
 function tmpFile(name: string): string {
   const dir = mkdtempSync(join(process.cwd(), ".claude/tmp/hook-inst-"));
@@ -157,5 +159,53 @@ describe("installSafetyDeny → uninstallSafetyDeny round trip", () => {
     uninstallSafetyDeny(f);
     const after = JSON.parse(readFileSync(f, "utf8"));
     expect(after.permissions).toBeUndefined();
+  });
+});
+
+describe("validateHookConfig", () => {
+  it("accepts empty object", () => {
+    expect(validateHookConfig({})).toBe(true);
+  });
+  it("accepts a well-formed PreToolUse config", () => {
+    expect(validateHookConfig({
+      hooks: { PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "x", timeout: 100 }] }] },
+    })).toBe(true);
+  });
+  it("rejects non-object", () => {
+    expect(validateHookConfig(null)).toBe(false);
+    expect(validateHookConfig("string")).toBe(false);
+    expect(validateHookConfig([1, 2, 3])).toBe(false);
+  });
+  it("rejects when hooks is an array", () => {
+    expect(validateHookConfig({ hooks: [] })).toBe(false);
+  });
+  it("rejects when PreToolUse entry has no matcher", () => {
+    expect(validateHookConfig({ hooks: { PreToolUse: [{ hooks: [] }] } })).toBe(false);
+  });
+  it("rejects when a hook lacks command", () => {
+    expect(validateHookConfig({
+      hooks: { PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command" }] }] },
+    })).toBe(false);
+  });
+  it("rejects when timeout is not a number", () => {
+    expect(validateHookConfig({
+      hooks: { PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "x", timeout: "100" }] }] },
+    })).toBe(false);
+  });
+  it("rejects when permissions.deny is not an array", () => {
+    expect(validateHookConfig({ permissions: { deny: "oops" } })).toBe(false);
+  });
+});
+
+describe("readJsonSafe via mergeBashConfirmHook", () => {
+  it("backs up a corrupt JSON file before overwriting", () => {
+    const dir = mkdtempSync(join(process.cwd(), ".claude/tmp/corrupt-backup-"));
+    const f = join(dir, "settings.json");
+    writeFileSync(f, "{ this is not valid json");
+    mergeBashConfirmHook(f, "/abs/hook");
+    // Backup file (settings.json.corrupt-<ts>) should exist.
+    const siblings = readdirSync(dir);
+    const backup = siblings.find((n: string) => n.startsWith("settings.json.corrupt-"));
+    expect(backup).toBeTruthy();
   });
 });

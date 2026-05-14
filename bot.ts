@@ -36,6 +36,7 @@ import { downloadTelegramFile, inferExtension, makeMediaPath } from "./lib/media
 import { resolveCliPath } from "./lib/resolve-cli-path.ts";
 import { rotateIfLarge, truncateIfLarge } from "./lib/log-rotate.ts";
 import { createRateLimiter } from "./lib/rate-limiter.ts";
+import { DEFAULT_DANGER_PATTERNS, type DangerPattern } from "./lib/danger-patterns.ts";
 
 // ---------- types ----------
 type Agent = "claude" | "codex" | "pi" | "gemini";
@@ -171,6 +172,28 @@ const UPLOADS_ROOT = join(HOME, "workspace", "uploads");
 mkdirSync(dirname(LOG_FILE), { recursive: true });
 mkdirSync(SESSION_ROOT, { recursive: true });
 mkdirSync(dirname(SOCKET_PATH), { recursive: true });
+
+// ---------- process hardening ----------
+// Strip env vars an attacker could use to hijack libraries loaded by
+// child processes (LD_PRELOAD on Linux, DYLD_* on macOS, malloc-stack
+// logging that can be coerced into arbitrary file writes). Mirrors the
+// Codex CLI `codex-process-hardening` crate. Runs BEFORE config load so
+// every subsequent log line / spawn / fetch sees the cleaned env.
+const HIJACK_ENV = [
+  "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT",
+  "DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH",
+  "DYLD_FRAMEWORK_PATH", "DYLD_FALLBACK_LIBRARY_PATH",
+  "DYLD_FALLBACK_FRAMEWORK_PATH",
+  "MallocStackLogging", "MallocStackLoggingNoCompact",
+  "MallocLogFile",
+] as const;
+const _strippedEnv: string[] = [];
+for (const k of HIJACK_ENV) {
+  if (process.env[k] !== undefined) {
+    _strippedEnv.push(k);
+    delete process.env[k];
+  }
+}
 
 // ---------- config ----------
 const config: Config = JSON.parse(readFileSync(CONFIG_FILE, "utf8"));
@@ -476,13 +499,19 @@ interface ConfirmMsgRecord { messageId: number; chatId: number; }
 const confirmMessages = new Map<string, ConfirmMsgRecord>();
 let confirmServer: ConfirmServer | null = null;
 
+function findDangerPattern(id: string): DangerPattern | undefined {
+  return DEFAULT_DANGER_PATTERNS.find((p) => p.id === id);
+}
+
 function confirmMessageText(req: ConfirmRequest): string {
   const truncated = req.command.length > 800 ? req.command.slice(0, 800) + "…" : req.command;
+  const just = findDangerPattern(req.patternId)?.justification;
   return [
     "⚠️ 위험 명령 확인",
     "",
     `에이전트: ${req.agent}`,
     `패턴: ${req.patternId} — ${req.reason}`,
+    ...(just ? ["", `이유: ${just}`] : []),
     "",
     "명령:",
     truncated,
@@ -518,6 +547,35 @@ async function promptConfirm(req: ConfirmRequest): Promise<void> {
       chatId: req.chatId, type: "confirm_decision", agent: req.agent,
       data: { requestId: req.requestId, patternId: req.patternId, decision: "allow", reason: "safety_off" },
     });
+    return;
+  }
+
+  // Policy-level forbidden patterns (decision: "forbidden") skip the
+  // inline-keyboard prompt entirely. The user gets a one-shot rejection
+  // notice with the policy's justification — no ambiguity, no waiting.
+  const pattern = findDangerPattern(req.patternId);
+  if (pattern?.decision === "forbidden") {
+    const why = pattern.justification ?? pattern.reason;
+    confirmServer?.respond(req.requestId, "deny", `정책상 거부: ${why}`);
+    audit.write({
+      chatId: req.chatId, type: "confirm_decision", agent: req.agent,
+      data: {
+        requestId: req.requestId,
+        patternId: req.patternId,
+        decision: "deny",
+        reason: "forbidden_by_policy",
+        justification: why,
+      },
+    });
+    try {
+      const cmd = req.command.length > 200 ? req.command.slice(0, 200) + "…" : req.command;
+      await sendMessage(
+        req.chatId,
+        `🛑 정책상 거부된 명령 — pattern=${req.patternId}\n사유: ${why}\n\n명령:\n${cmd}`,
+      );
+    } catch (err) {
+      log("error", `forbidden notice failed: ${err}`);
+    }
     return;
   }
   try {
@@ -1503,6 +1561,9 @@ async function pollLoop(): Promise<void> {
   try {
     const me = await tg<TgUser & { username: string }>("getMe");
     log("info", `bot started: @${me.username} (id=${me.id})`);
+    if (_strippedEnv.length > 0) {
+      log("info", `process-hardening: stripped env [${_strippedEnv.join(", ")}]`);
+    }
   } catch (err) {
     log("error", `getMe failed — check token: ${err}`);
     process.exit(1);
