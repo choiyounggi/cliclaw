@@ -20,6 +20,7 @@ import { existsSync } from "node:fs";
 
 import * as launchd from "./lib/launchd.ts";
 import { resolveCliPath } from "./lib/resolve-cli-path.ts";
+import { printBanner } from "./lib/banner.ts";
 
 const ROOT = dirname(Bun.fileURLToPath(import.meta.url));
 const ENTRY_TS = resolve(ROOT, "bot.ts");
@@ -35,6 +36,10 @@ function resolveBunPath(): string {
 
 async function main(): Promise<void> {
   const [cmd, ...rest] = process.argv.slice(2);
+  // Skip the banner on `start` because the bot daemon's stdout follows
+  // immediately afterward and the art would just push real logs off-screen
+  // / mix with launchd's bot.log. Every other command is interactive.
+  if (cmd !== "start") printBanner(import.meta.url);
   switch (cmd ?? "help") {
     case "init":
       await cmdInit();
