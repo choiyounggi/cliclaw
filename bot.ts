@@ -185,7 +185,30 @@ if (!AGENT_NAMES.includes(config.defaultAgent)) {
 config.cwd = resolvePath(HOME, config.cwd);
 mkdirSync(config.cwd, { recursive: true });
 
+// `confirmGateEnabled` reflects whether the hook infrastructure is wired up
+// at all (set once at boot from config). `safetyEnabled` is the runtime
+// toggle the user flips via /safety on|off — it gates whether IPC requests
+// from the installed hook actually prompt the user or get auto-allowed.
+// Separating the two lets /safety stay a soft switch without needing to
+// (re)install hooks at runtime.
 const confirmGateEnabled = config.confirmGate?.enabled !== false; // default ON
+const SAFETY_FILE = join(HOME, "safety.json");
+
+function loadSafety(): boolean {
+  if (!confirmGateEnabled) return false; // hook missing → toggle is a no-op
+  try {
+    const parsed = JSON.parse(readFileSync(SAFETY_FILE, "utf8")) as { enabled?: unknown };
+    if (typeof parsed.enabled === "boolean") return parsed.enabled;
+  } catch { /* no persisted state yet */ }
+  return true; // default ON when hook infra is up
+}
+
+function saveSafety(enabled: boolean): void {
+  try { writeFileSync(SAFETY_FILE, JSON.stringify({ enabled }, null, 2)); }
+  catch (err) { log("error", `persist safety state failed: ${err}`); }
+}
+
+let safetyEnabled = loadSafety();
 const confirmPendingTimeoutMs = config.confirmGate?.pendingTimeoutMs ?? 5 * 60 * 1000;
 const extraDangerPatterns = config.confirmGate?.extraPatterns ?? [];
 const streamingEnabled = config.streaming?.enabled !== false;
@@ -199,8 +222,9 @@ function agentIdleTimeoutMs(agent: Agent): number | undefined {
   return config.agents[agent].idleTimeoutMs ?? config.idleTimeoutMs;
 }
 function agentModeLabel(agent: Agent): string {
-  if (agent === "claude") return confirmGateEnabled ? "헤드리스 (위험명령 확인 ON)" : "헤드리스";
-  if (agent === "codex")  return `sandbox=${config.agents.codex.sandbox}${confirmGateEnabled ? " + 위험명령 확인 ON" : ""}`;
+  const safetyTag = safetyEnabled ? " + 안전모드 ON" : "";
+  if (agent === "claude") return confirmGateEnabled ? `헤드리스${safetyTag}` : "헤드리스";
+  if (agent === "codex")  return `sandbox=${config.agents.codex.sandbox}${confirmGateEnabled ? safetyTag : ""}`;
   if (agent === "pi")     return "기본";
   return "?";
 }
@@ -374,6 +398,17 @@ if (confirmGateEnabled) {
 }
 
 async function promptConfirm(req: ConfirmRequest): Promise<void> {
+  // Runtime safety toggle: when OFF, the user has chosen to rely on their
+  // own external Bash guards (pre-bash-guard, EDR, etc.) and we pass the
+  // request straight through without surfacing a Telegram prompt.
+  if (!safetyEnabled) {
+    confirmServer?.respond(req.requestId, "allow", "안전모드 OFF (사용자 환경의 외부 가드에 위임)");
+    audit.write({
+      chatId: req.chatId, type: "confirm_decision", agent: req.agent,
+      data: { requestId: req.requestId, patternId: req.patternId, decision: "allow", reason: "safety_off" },
+    });
+    return;
+  }
   try {
     const msg = await tg<TgMessage>("sendMessage", {
       chat_id: req.chatId,
@@ -778,6 +813,53 @@ function parseAgentSwitch(text: string): Agent | null {
   return null;
 }
 
+function safetyLabel(): string {
+  if (!confirmGateEnabled) return "비활성 (config)";
+  return safetyEnabled ? "ON" : "OFF";
+}
+
+async function handleSafetyCommand(chatId: number, arg: string): Promise<void> {
+  // When the hook was disabled at boot via config, the toggle is inert —
+  // the wired pre-tool hook simply isn't there to ask in the first place.
+  if (!confirmGateEnabled) {
+    await sendMessage(
+      chatId,
+      "안전모드는 이 설치본에서 비활성화되어 있습니다 (config.confirmGate.enabled=false).\n" +
+        "다시 활성화하려면 config.json을 수정하고 봇을 재시작하세요.",
+    );
+    return;
+  }
+  if (arg === "" || arg === "status") {
+    const state = safetyEnabled ? "ON" : "OFF";
+    const detail = safetyEnabled
+      ? "위험 명령(rm -rf · DROP · sudo · ssh prd-* …)이 텔레그램으로 다시 물어봅니다."
+      : "모든 Bash 명령이 즉시 실행됩니다. 본인 환경의 외부 가드(pre-bash-guard, EDR 등)에 위임된 상태입니다.";
+    await sendMessage(chatId, `🛡 안전모드: ${state}\n${detail}\n\n사용: /safety on · /safety off`);
+    return;
+  }
+  if (arg === "on") {
+    if (safetyEnabled) { await sendMessage(chatId, "🛡 안전모드는 이미 ON 입니다."); return; }
+    safetyEnabled = true;
+    saveSafety(true);
+    log("info", `safety: ON (chat=${chatId})`);
+    await sendMessage(chatId, "🛡 안전모드 ON. 위험 명령은 텔레그램으로 다시 묻습니다.");
+    return;
+  }
+  if (arg === "off") {
+    if (!safetyEnabled) { await sendMessage(chatId, "🛡 안전모드는 이미 OFF 입니다."); return; }
+    safetyEnabled = false;
+    saveSafety(false);
+    log("info", `safety: OFF (chat=${chatId})`);
+    await sendMessage(
+      chatId,
+      "🛡 안전모드 OFF. 모든 Bash 명령이 즉시 실행됩니다.\n" +
+        "본인 환경의 외부 가드(pre-bash-guard, EDR 등)가 위험 명령을 차단하는지 확인하세요.",
+    );
+    return;
+  }
+  await sendMessage(chatId, "사용: /safety · /safety on · /safety off");
+}
+
 function helpText(active: Agent): string {
   return [
     "🤖 로컬 멀티에이전트 봇",
@@ -794,10 +876,11 @@ function helpText(active: Agent): string {
     "  /reset all  — 이 채팅의 모든 에이전트 세션 초기화",
     "  /status     — 에이전트별 세션 상태 + 진행 중 작업 표시",
     "  /stop       — 진행 중 작업 취소",
+    "  /safety     — 안전모드 상태 (/safety on · off로 토글)",
     "  /help       — 이 도움말",
     "",
     `작업 디렉토리: ${config.cwd}`,
-    `위험명령 확인: ${confirmGateEnabled ? "ON (claude+codex)" : "OFF"}`,
+    `안전모드: ${safetyLabel()}`,
     `스트리밍: ${streamingEnabled ? "ON (claude)" : "OFF"}`,
   ].join("\n");
 }
@@ -931,6 +1014,12 @@ async function handleMessage(msg: TgMessage): Promise<void> {
     const s = chat.agents[switchTo];
     const tail = s ? ` (이어가기, ${s.turnCount}턴)` : " (새 세션)";
     await sendMessage(chatId, `✅ ${switchTo}로 전환됨${tail}`);
+    return;
+  }
+
+  if (text === "/safety" || text.startsWith("/safety ")) {
+    audit.write({ chatId, userId, type: "cmd", data: { cmd: "safety", arg: text.slice(7).trim() } });
+    await handleSafetyCommand(chatId, text.slice(7).trim().toLowerCase());
     return;
   }
 
@@ -1112,7 +1201,8 @@ async function pollLoop(): Promise<void> {
     process.exit(1);
   }
   log("info", `agents=[${AGENT_NAMES.join(",")}] default=${config.defaultAgent} allowed=[${config.allowedUserIds.join(",")}] cwd=${config.cwd}`);
-  log("info", `confirm gate: ${confirmGateEnabled ? `ON (socket=${SOCKET_PATH})` : "OFF"}`);
+  log("info", `confirm gate: ${confirmGateEnabled ? `wired (socket=${SOCKET_PATH})` : "OFF (disabled in config)"}`);
+  log("info", `safety: ${safetyLabel()}`);
 
   while (running) {
     try {
