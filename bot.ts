@@ -15,7 +15,7 @@
  *    merged hooks.json in each CODEX_HOME for Codex).
  */
 
-import { readFileSync, writeFileSync, existsSync, appendFileSync, mkdirSync, symlinkSync, unlinkSync, lstatSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, appendFileSync, mkdirSync, symlinkSync, unlinkSync, lstatSync, readdirSync, statSync } from "fs";
 import { join, dirname, resolve as resolvePath } from "path";
 import { homedir } from "os";
 
@@ -34,6 +34,7 @@ import { createToolIndicator, type ToolIndicator } from "./lib/tool-indicator.ts
 import { markdownToTelegramHtml } from "./lib/telegram-html.ts";
 import { downloadTelegramFile, inferExtension, makeMediaPath } from "./lib/media-download.ts";
 import { resolveCliPath } from "./lib/resolve-cli-path.ts";
+import { rotateIfLarge, truncateIfLarge } from "./lib/log-rotate.ts";
 
 // ---------- types ----------
 type Agent = "claude" | "codex" | "pi" | "gemini";
@@ -83,6 +84,18 @@ interface Config {
   logLevel: "debug" | "info" | "error";
   confirmGate?: ConfirmGateConfig;
   streaming?: StreamingConfig;
+  /** bot.log rotation threshold in MB. Default 10. */
+  logRotateMb?: number;
+  /** Number of rotated bot.log generations to keep on disk. Default 3. */
+  logRotateKeep?: number;
+  /** audit.jsonl rotation threshold in MB. Default 20. */
+  auditRotateMb?: number;
+  /** Rotated audit.jsonl generations to keep. Default 3. */
+  auditRotateKeep?: number;
+  /** Truncate bot.err on startup if larger than this in MB. Default 1. */
+  stderrTruncateMb?: number;
+  /** Days of inactivity before workspace/uploads/<chatId>/<file> is removed. Default 7. */
+  uploadsRetentionDays?: number;
 }
 
 interface TgUser { id: number; username?: string; first_name?: string; }
@@ -298,15 +311,31 @@ function redact(msg: string): string {
   return out;
 }
 
+// Rotate when bot.log crosses LOG_ROTATE_BYTES; keep LOG_ROTATE_KEEP
+// generations on disk (bot.log.1 ... bot.log.N). Defaults sized for
+// a year of routine traffic at typical chat volumes — a stuck crash
+// loop is still bounded.
+const LOG_ROTATE_BYTES = (config.logRotateMb ?? 10) * 1024 * 1024;
+const LOG_ROTATE_KEEP  = config.logRotateKeep ?? 3;
+const AUDIT_ROTATE_BYTES = (config.auditRotateMb ?? 20) * 1024 * 1024;
+const AUDIT_ROTATE_KEEP  = config.auditRotateKeep ?? 3;
+const STDERR_TRUNCATE_BYTES = (config.stderrTruncateMb ?? 1) * 1024 * 1024;
+
 function log(level: "debug" | "info" | "error", msg: string): void {
   const order = { debug: 0, info: 1, error: 2 };
   if (order[level] < order[config.logLevel]) return;
   const line = `[${new Date().toISOString()}] ${level.toUpperCase()} ${redact(msg)}\n`;
   process.stdout.write(line);
+  // Cheap stat-on-every-call. Avoids needing to reason about per-write
+  // counters that get wrong across multi-process scenarios.
+  rotateIfLarge(LOG_FILE, { maxBytes: LOG_ROTATE_BYTES, keep: LOG_ROTATE_KEEP });
   try { appendFileSync(LOG_FILE, line); } catch {}
 }
 
-const audit: AuditWriter = createAuditWriter(AUDIT_FILE);
+const audit: AuditWriter = createAuditWriter(AUDIT_FILE, {
+  maxBytes: AUDIT_ROTATE_BYTES,
+  keep: AUDIT_ROTATE_KEEP,
+});
 const jobs = new JobRegistry();
 
 // ---------- session store ----------
@@ -1395,6 +1424,52 @@ async function pollLoop(): Promise<void> {
   }
   log("info", "poll loop stopped");
 }
+
+// ---------- startup housekeeping ----------
+// launchd appends to bot.err across restarts, with no rotation hook of
+// its own. We truncate it ourselves on every boot so a one-time crash
+// loop doesn't leave the user with a GB-sized error log forever.
+const STDERR_FILE = join(HOME, "logs", "bot.err");
+if (truncateIfLarge(STDERR_FILE, STDERR_TRUNCATE_BYTES)) {
+  log("info", `bot.err truncated (was > ${STDERR_TRUNCATE_BYTES} bytes)`);
+}
+
+// Sweep stale uploads at boot, then again periodically while the bot
+// is alive. Photo attachments can balloon the workspace dir for chatty
+// users with image-heavy prompts; without this the directory grows
+// unbounded.
+function sweepStaleUploads(): void {
+  const retentionDays = config.uploadsRetentionDays ?? 7;
+  const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
+  let removedFiles = 0;
+  let removedBytes = 0;
+  try {
+    const chatDirs = readdirSync(UPLOADS_ROOT, { withFileTypes: true });
+    for (const dir of chatDirs) {
+      if (!dir.isDirectory()) continue;
+      const chatDir = join(UPLOADS_ROOT, dir.name);
+      for (const f of readdirSync(chatDir, { withFileTypes: true })) {
+        if (!f.isFile()) continue;
+        const path = join(chatDir, f.name);
+        try {
+          const st = statSync(path);
+          if (st.mtimeMs < cutoff) {
+            unlinkSync(path);
+            removedFiles++;
+            removedBytes += st.size;
+          }
+        } catch { /* ignore — best effort */ }
+      }
+    }
+  } catch { /* UPLOADS_ROOT may not exist yet — fine */ }
+  if (removedFiles > 0) {
+    log("info", `uploads sweep: removed ${removedFiles} files (${Math.round(removedBytes / 1024)} KB) older than ${retentionDays}d`);
+  }
+}
+sweepStaleUploads();
+// Re-sweep once a day so a long-running bot doesn't accumulate
+// week-old photos between restarts.
+setInterval(sweepStaleUploads, 24 * 60 * 60 * 1000).unref?.();
 
 // ---------- startup ----------
 ensureWorkspaceClaudeSettings();
