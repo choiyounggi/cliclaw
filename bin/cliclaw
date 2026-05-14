@@ -2,22 +2,42 @@
 # cliclaw — npm/bun-installable CLI shim.
 #
 # Globally-installed Node packages can't rely on a Bun shebang on their .ts
-# entry point because npm symlinks the bin into PATH and POSIX shells need a
-# real executable. This wrapper:
-#   1. Confirms `bun` is on PATH (or falls back to a known install path).
-#   2. Exec's the TypeScript entry point through Bun.
+# entry point because npm/bun symlink the bin into PATH and POSIX shells need
+# a real executable. This wrapper:
+#   1. Resolves the symlink trail to find the real package directory.
+#      (Both npm and bun globally install via a symlink in ~/.bun/bin or the
+#      npm prefix's bin/ directory pointing at the package's bin/cliclaw.
+#      `$0` is the symlink path, so we have to walk it back to the real file.)
+#   2. Confirms `bun` is on PATH (or falls back to a known install path).
+#   3. Exec's the TypeScript entry point through Bun.
 #
 # If `bun` is missing, print install instructions instead of a cryptic
 # "command not found".
 
 set -e
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# ──────────────────────────────────────────────────────────────────────
+# Resolve "$0" through any chain of symlinks to the real on-disk file.
+# Portable across macOS (no `readlink -f`) and Linux. Handles relative
+# symlink targets by re-anchoring against the symlink's own directory.
+# ──────────────────────────────────────────────────────────────────────
+target="$0"
+while [ -L "$target" ]; do
+    link_dir="$(cd "$(dirname "$target")" && pwd)"
+    target="$(readlink "$target")"
+    case "$target" in
+        /*) ;;
+        *)  target="$link_dir/$target" ;;
+    esac
+done
+
+SCRIPT_DIR="$(cd "$(dirname "$target")" && pwd)"
 PKG_DIR="$(dirname "$SCRIPT_DIR")"
 CLI_TS="$PKG_DIR/cli.ts"
 
 if [ ! -f "$CLI_TS" ]; then
     echo "cliclaw: cannot find cli.ts at $CLI_TS" >&2
+    echo "cliclaw: (resolved from \$0=$0 → target=$target)" >&2
     exit 1
 fi
 
