@@ -25,6 +25,35 @@ describe("matchDanger — destructive filesystem", () => {
   it("matches mkfs", () => {
     expect(matchDanger("mkfs.ext4 /dev/nvme0n1")?.id).toBe("dd-mkfs");
   });
+
+  // Regression: the prior alternation `(sda|sdb|nvme|disk|null$)` matched the
+  // trailing `/dev/null` in commands like `cat foo 2>/dev/null`, routing
+  // routine commands through the Telegram confirm gate and producing a 5-min
+  // timeout for every legitimate read.
+  it.each([
+    ["cat /etc/hosts 2>/dev/null"],
+    ["ls -la 2>/dev/null"],
+    ["echo done > /dev/null"],
+    ["grep foo bar.txt 2>/dev/null"],
+    ["pkg < /dev/zero"],
+    ["read x < /dev/tty"],
+    ["mock > /dev/stdout"],
+    ["copy random > /dev/urandom"],
+  ])("does NOT flag safe /dev/* redirects: %s", (cmd) => {
+    expect(matchDanger(cmd)).toBeNull();
+  });
+
+  it.each([
+    ["cat > /dev/sda"],
+    ["echo data > /dev/sdb"],
+    ["wipefs > /dev/disk0"],
+    ["dump > /dev/hda"],
+    ["zero > /dev/mmcblk0"],
+    ["mount-image > /dev/loop0"],
+    ["echo > /dev/nvme0n1"],
+  ])("flags block-device redirects: %s", (cmd) => {
+    expect(matchDanger(cmd)?.id).toBe("redirect-to-dev");
+  });
 });
 
 describe("matchDanger — git destructive", () => {

@@ -34,8 +34,14 @@ export const DEFAULT_DANGER_PATTERNS: readonly DangerPattern[] = [
   },
   {
     id: "redirect-to-dev",
-    re: />\s*\/dev\/(sda|sdb|nvme|disk|null$)/,
-    reason: "디바이스 직접 리다이렉션",
+    // Only real block devices. /dev/null, /dev/zero, /dev/random, /dev/tty,
+    // /dev/stdout, /dev/stderr are legitimate redirect targets every shell
+    // session touches dozens of times. The prior alternation included
+    // `null$` which matched the trailing `/dev/null` in `cmd 2>/dev/null`,
+    // routing nearly every common command through the confirm gate and
+    // causing 5-minute timeouts on the Telegram client.
+    re: />\s*\/dev\/(sd[a-z]|nvme\d|hd[a-z]|disk\d|mmcblk\d|loop\d)/i,
+    reason: "디스크 디바이스 직접 리다이렉션",
   },
 
   // ── Git destructive ──
