@@ -33,7 +33,12 @@ import { resolveCliPath } from "./lib/resolve-cli-path.ts";
 
 // ---------- types ----------
 type Agent = "claude" | "codex" | "pi";
-const AGENT_NAMES: readonly Agent[] = ["claude", "codex", "pi"] as const;
+// All agents this bot knows how to drive. Populated at boot from ALL_AGENTS
+// minus any whose CLI we cannot locate — see the install detection block
+// further down. Code that needs to know which agents are *actually* usable
+// in this process should read AGENT_NAMES.
+const ALL_AGENTS = ["claude", "codex", "pi"] as const;
+let AGENT_NAMES: Agent[] = [...ALL_AGENTS];
 
 interface ClaudeAgentConfig { path: string; model: string; maxTurns?: number; timeoutMs?: number; idleTimeoutMs?: number; }
 interface CodexAgentConfig  { path: string; model: string | null; sandbox: "read-only" | "workspace-write" | "danger-full-access"; maxTurns?: number; timeoutMs?: number; idleTimeoutMs?: number; }
@@ -155,30 +160,47 @@ if (!config.token || config.token.startsWith("PASTE_")) {
 // (well-known locations, nvm scan, login-shell fallback) so the bot works on
 // any user's machine without hand-edited absolute paths. An explicit path that
 // exists is honored as-is — auto-discovery is opt-in by omission.
-for (const a of AGENT_NAMES) {
-  const p = config.agents[a]?.path;
-  if (p && existsSync(p)) continue;
-  const resolved = resolveCliPath(a);
-  if (!resolved) {
-    const detail = p
-      ? `configured path missing (${p}) and auto-discovery failed`
-      : "no path configured and auto-discovery failed";
-    console.error(
-      `config.json: agents.${a} unavailable — ${detail}. ` +
-        `Install the CLI or set agents.${a}.path explicitly.`,
-    );
-    process.exit(1);
+//
+// Agents whose CLI cannot be located are DROPPED from AGENT_NAMES rather than
+// killing the bot — users routinely pick a subset (claude only, or claude +
+// codex without pi, etc.) and earlier versions refused to start in that case.
+{
+  const usable: Agent[] = [];
+  for (const a of AGENT_NAMES) {
+    const p = config.agents[a]?.path;
+    if (p && existsSync(p)) { usable.push(a); continue; }
+    const resolved = resolveCliPath(a);
+    if (!resolved) {
+      const detail = p
+        ? `configured path missing (${p}) and auto-discovery failed`
+        : "not installed (auto-discovery found no binary)";
+      console.error(`config.json: agents.${a} skipped — ${detail}.`);
+      continue;
+    }
+    if (p && p !== resolved) {
+      console.error(`config.json: agents.${a}.path missing (${p}); using ${resolved}`);
+    } else if (!p) {
+      console.error(`config.json: agents.${a}.path auto-resolved to ${resolved}`);
+    }
+    config.agents[a]!.path = resolved;
+    usable.push(a);
   }
-  if (p && p !== resolved) {
-    console.error(`config.json: agents.${a}.path missing (${p}); using ${resolved}`);
-  } else if (!p) {
-    console.error(`config.json: agents.${a}.path auto-resolved to ${resolved}`);
-  }
-  config.agents[a]!.path = resolved;
+  AGENT_NAMES = usable;
+}
+if (AGENT_NAMES.length === 0) {
+  console.error(
+    "No coding agent CLIs are available on this machine. " +
+      "Install at least one of: claude (Claude Code), codex, pi.",
+  );
+  process.exit(1);
 }
 if (!AGENT_NAMES.includes(config.defaultAgent)) {
-  console.error(`config.json: defaultAgent must be one of ${AGENT_NAMES.join(",")}`);
-  process.exit(1);
+  console.error(
+    `config.json: defaultAgent='${config.defaultAgent}' is not installed; ` +
+      `falling back to '${AGENT_NAMES[0]}'. ` +
+      `Available: ${AGENT_NAMES.join(", ")}.`,
+  );
+  config.defaultAgent = AGENT_NAMES[0];
 }
 // Resolve a relative cwd against the user's CLICLAW_HOME so launchctl /
 // cron / arbitrary working directories all yield the same workspace path.
@@ -257,6 +279,12 @@ function saveStore(s: SessionStore): void {
 function getChat(store: SessionStore, chatId: number): ChatState {
   const key = String(chatId);
   if (!store[key]) store[key] = { active: config.defaultAgent, agents: {} };
+  // The stored `active` may name an agent whose CLI got uninstalled between
+  // runs. Don't dispatch to a missing binary — silently rewind to the boot
+  // defaultAgent and let the user re-select with /claude /codex /pi.
+  if (!AGENT_NAMES.includes(store[key].active)) {
+    store[key].active = config.defaultAgent;
+  }
   return store[key];
 }
 function getOrInitAgentSession(chat: ChatState, agent: Agent): AgentSession {
@@ -803,9 +831,14 @@ const store = loadStore();
 
 function parseAgentSwitch(text: string): Agent | null {
   const t = text.toLowerCase().trim();
-  if (t === "/claude") return "claude";
-  if (t === "/codex")  return "codex";
-  if (t === "/pi")     return "pi";
+  // Map a /command to its agent name, but only honor it if that agent is
+  // actually installed on this machine. /claude on a host that doesn't have
+  // Claude Code installed should fall through to the unknown-command path
+  // rather than break the runAgent dispatcher.
+  const direct = t.startsWith("/") ? (t.slice(1) as Agent) : null;
+  if (direct && (ALL_AGENTS as readonly string[]).includes(direct)) {
+    return AGENT_NAMES.includes(direct) ? direct : null;
+  }
   if (t.startsWith("/use ")) {
     const name = t.slice(5).trim() as Agent;
     if (AGENT_NAMES.includes(name)) return name;
@@ -861,15 +894,19 @@ async function handleSafetyCommand(chatId: number, arg: string): Promise<void> {
 }
 
 function helpText(active: Agent): string {
+  const labels: Record<Agent, string> = {
+    claude: "  /claude — Anthropic Claude Code",
+    codex:  "  /codex  — OpenAI Codex",
+    pi:     "  /pi     — Pi Coding Agent",
+  };
+  const switchLines = AGENT_NAMES.map((a) => labels[a]);
   return [
     "🤖 로컬 멀티에이전트 봇",
     "",
     `현재 에이전트: ${active}`,
     "",
     "에이전트 전환:",
-    "  /claude — Anthropic Claude Code",
-    "  /codex  — OpenAI Codex",
-    "  /pi     — Pi Coding Agent",
+    ...switchLines,
     "",
     "세션 명령:",
     "  /reset      — 현재 에이전트 세션 초기화",
