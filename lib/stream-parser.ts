@@ -81,3 +81,39 @@ export function stripAnsi(s: string): string {
   // ESC [ ... letter — basic SGR/CSI strip
   return s.replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]/g, "");
 }
+
+/**
+ * Parse a Gemini CLI `-o stream-json` line.
+ *
+ * Observed event shapes (Gemini 0.42):
+ *   {"type":"init","session_id":"…","model":"…"}
+ *   {"type":"message","role":"user","content":"…"}
+ *   {"type":"message","role":"assistant","content":"…","delta":true}
+ *   {"type":"result","status":"success","stats":{…}}
+ *
+ * We surface text deltas (assistant + delta:true) for live streaming,
+ * and propagate the final "result" event so the caller knows when to
+ * stop polling. Tool-use events aren't part of Gemini's documented
+ * schema in 0.42, so detectProgressLine() picks up any free-form
+ * progress hints from stdout instead.
+ */
+export type GeminiStreamEvent =
+  | { kind: "text-delta"; text: string }
+  | { kind: "result"; ok: boolean }
+  | { kind: "other" };
+
+export function parseGeminiStreamLine(line: string): GeminiStreamEvent | null {
+  const t = line.trim();
+  if (!t || t[0] !== "{") return null;
+  let obj: unknown;
+  try { obj = JSON.parse(t); } catch { return null; }
+  if (!obj || typeof obj !== "object") return null;
+  const evt = obj as { type?: string; role?: string; content?: unknown; delta?: boolean; status?: string };
+  if (evt.type === "message" && evt.role === "assistant" && evt.delta === true && typeof evt.content === "string") {
+    return { kind: "text-delta", text: evt.content };
+  }
+  if (evt.type === "result") {
+    return { kind: "result", ok: evt.status === "success" };
+  }
+  return { kind: "other" };
+}

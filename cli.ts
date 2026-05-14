@@ -56,6 +56,12 @@ async function main(): Promise<void> {
     case "doctor":
       cmdDoctor();
       break;
+    case "upgrade":
+      await cmdUpgrade();
+      break;
+    case "logs":
+      cmdLogs(rest);
+      break;
     case "help":
     case "--help":
     case "-h":
@@ -117,6 +123,60 @@ function cmdUninstallLaunchd(): void {
   console.log(result.message);
 }
 
+/**
+ * One-line upgrade: re-install the npm/bun global package and bounce
+ * the LaunchAgent so the new binary takes effect. We detect which
+ * package manager the user used by which one's global node_modules
+ * currently holds the cliclaw binary — falling back to plain `npm` if
+ * neither is obviously the source.
+ */
+async function cmdUpgrade(): Promise<void> {
+  const pkg = "@younggichoi/cliclaw";
+  const installer = detectInstaller();
+  console.log(`Upgrading ${pkg} via ${installer}…`);
+  const installArgs = installer === "bun"
+    ? ["add", "-g", `${pkg}@latest`]
+    : ["install", "-g", `${pkg}@latest`];
+  await new Promise<void>((resolve, reject) => {
+    const c = spawn(installer, installArgs, { stdio: "inherit" });
+    c.on("exit", (code) => (code === 0 ? resolve() : reject(new Error(`${installer} exited ${code}`))));
+  });
+  if (!existsSync(join(HOME, "config.json"))) {
+    console.log("No config.json yet — run `cliclaw init` to finish setup.");
+    return;
+  }
+  // Reinstall the LaunchAgent so it points at the new package path on
+  // disk. The lib/launchd.ts install() now retries on bootout race, so
+  // a back-to-back uninstall/install works.
+  console.log("Reinstalling LaunchAgent…");
+  cmdUninstallLaunchd();
+  cmdInstallLaunchd();
+}
+
+function detectInstaller(): "bun" | "npm" {
+  // ROOT looks like one of:
+  //   ~/.bun/install/global/node_modules/@younggichoi/cliclaw   (bun)
+  //   <prefix>/lib/node_modules/@younggichoi/cliclaw            (npm)
+  return ROOT.includes("/.bun/") ? "bun" : "npm";
+}
+
+/**
+ * Stream a log file with `tail -f`. Three flags pick which:
+ *   default → bot.log     --audit → audit.jsonl    --err → bot.err
+ */
+function cmdLogs(args: string[]): void {
+  let target = "bot.log";
+  if (args.includes("--audit")) target = "audit.jsonl";
+  else if (args.includes("--err")) target = "bot.err";
+  const path = join(HOME, "logs", target);
+  if (!existsSync(path)) {
+    console.error(`No such log file: ${path}`);
+    process.exit(1);
+  }
+  const child = spawn("tail", ["-F", path], { stdio: "inherit" });
+  child.on("exit", (code) => process.exit(code ?? 0));
+}
+
 function cmdDoctor(): void {
   console.log(`cliclaw doctor`);
   console.log(`  ROOT (source):    ${ROOT}`);
@@ -141,6 +201,9 @@ Commands:
   start              Run the bot in the foreground
   install-launchd    Install + load macOS LaunchAgent
   uninstall-launchd  Unload + remove macOS LaunchAgent
+  upgrade            Pull @latest from npm and reinstall LaunchAgent
+  logs [--audit|--err]
+                     tail -F a log file (default: bot.log)
   doctor             Print resolved paths and agent availability
   help               This message
 

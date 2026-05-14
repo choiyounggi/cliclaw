@@ -22,7 +22,7 @@ import { homedir } from "os";
 import { JobRegistry, type Job } from "./lib/job-registry.ts";
 import { createAuditWriter, type AuditWriter } from "./lib/audit-log.ts";
 import { runSubprocessStream } from "./lib/subprocess-stream.ts";
-import { parseClaudeStreamLine, detectProgressLine, stripAnsi } from "./lib/stream-parser.ts";
+import { parseClaudeStreamLine, parseGeminiStreamLine, detectProgressLine, stripAnsi } from "./lib/stream-parser.ts";
 import { ConfirmServer, type ConfirmRequest } from "./lib/confirm-server.ts";
 import {
   installBashConfirmHook,
@@ -35,6 +35,7 @@ import { markdownToTelegramHtml } from "./lib/telegram-html.ts";
 import { downloadTelegramFile, inferExtension, makeMediaPath } from "./lib/media-download.ts";
 import { resolveCliPath } from "./lib/resolve-cli-path.ts";
 import { rotateIfLarge, truncateIfLarge } from "./lib/log-rotate.ts";
+import { createRateLimiter } from "./lib/rate-limiter.ts";
 
 // ---------- types ----------
 type Agent = "claude" | "codex" | "pi" | "gemini";
@@ -96,6 +97,8 @@ interface Config {
   stderrTruncateMb?: number;
   /** Days of inactivity before workspace/uploads/<chatId>/<file> is removed. Default 7. */
   uploadsRetentionDays?: number;
+  /** Per-chat rate limit. Default 30 messages per 60 seconds. */
+  rateLimit?: { maxPerWindow?: number; windowMs?: number };
 }
 
 interface TgUser { id: number; username?: string; first_name?: string; }
@@ -335,6 +338,14 @@ function log(level: "debug" | "info" | "error", msg: string): void {
 const audit: AuditWriter = createAuditWriter(AUDIT_FILE, {
   maxBytes: AUDIT_ROTATE_BYTES,
   keep: AUDIT_ROTATE_KEEP,
+});
+
+// Per-chat sliding-window rate limit. Defaults are an abuse circuit-
+// breaker, not a quota — 30/min is well above a human typing pace but
+// catches an auto-forwarder or accidental loop within seconds.
+const rateLimiter = createRateLimiter({
+  maxPerWindow: config.rateLimit?.maxPerWindow ?? 30,
+  windowMs: config.rateLimit?.windowMs ?? 60_000,
 });
 const jobs = new JobRegistry();
 
@@ -881,6 +892,7 @@ async function runGemini(
   session: AgentSession | undefined,
   abort: AbortSignal,
   onProgress: (text: string) => void,
+  stream: StreamingMessage | null,
 ): Promise<AgentResult> {
   const c = config.agents.gemini;
   // Per-chat cwd so each chat has its own `~/.gemini/<project>/sessions/`
@@ -894,17 +906,34 @@ async function runGemini(
   // for shell-level actions until that integration lands. Users who want
   // full autonomy can opt into "yolo" via config.agents.gemini.approvalMode.
   const approval = c.approvalMode ?? "auto_edit";
+  // stream-json gives us per-token "delta:true" assistant messages; if the
+  // caller wants live streaming we ask for that format, otherwise stick
+  // with plain text so the consumer doesn't have to reassemble.
+  const useStreamJson = !!stream;
   const args = [
     "-p", prompt,
     "--approval-mode", approval,
-    "-o", "text",
+    "-o", useStreamJson ? "stream-json" : "text",
   ];
   if (c.model) args.push("-m", c.model);
   if (session && session.turnCount > 0) args.push("-r", "latest");
 
-  log("debug", `gemini args: --approval-mode ${approval} ${session && session.turnCount > 0 ? "-r latest" : "(new)"} model=${c.model ?? "default"}`);
+  log("debug", `gemini args: --approval-mode ${approval} ${session && session.turnCount > 0 ? "-r latest" : "(new)"} model=${c.model ?? "default"} stream=${useStreamJson}`);
 
+  // Buffer the assistant text deltas; we keep them so the final
+  // returned text matches what the user already saw streamed.
+  let streamedText = "";
   const onLine = (line: string): void => {
+    if (useStreamJson) {
+      const evt = parseGeminiStreamLine(line);
+      if (evt?.kind === "text-delta") {
+        streamedText += evt.text;
+        stream!.append(evt.text);
+        return;
+      }
+      if (evt?.kind === "result" || evt?.kind === "other") return;
+      // Fall through to heuristic on non-JSON lines (rare — banner output).
+    }
     const indicator = detectProgressLine(line);
     if (indicator) {
       audit.write({ chatId, type: "tool_use", agent: "gemini", data: { brief: indicator } });
@@ -926,7 +955,10 @@ async function runGemini(
   if (killedReason === "timeout") return { sessionId: null, text: "", error: `타임아웃 (${timeoutMs}ms 초과)` };
   if (killedReason === "idle") return { sessionId: null, text: "", error: `무활동 타임아웃 (${idleTimeoutMs}ms)` };
 
-  const text = stripAnsi(stdout).trim();
+  // When streaming via stream-json, `streamedText` is the canonical
+  // answer (it's what the user already saw). Plain stdout contains the
+  // raw newline-delimited JSON which we never want to send back.
+  const text = useStreamJson ? streamedText.trim() : stripAnsi(stdout).trim();
   if (exitCode !== 0) {
     return { sessionId: null, text: "", error: (stripAnsi(stderr).trim() || text).slice(0, 4000) };
   }
@@ -946,7 +978,7 @@ async function runAgent(
   if (agent === "claude") return runClaude(prompt, session, chatId, abort, onProgress, stream);
   if (agent === "codex")  return runCodex(prompt, chatId, session, abort, onProgress);
   if (agent === "pi")     return runPi(prompt, chatId, session, abort, onProgress);
-  if (agent === "gemini") return runGemini(prompt, chatId, session, abort, onProgress);
+  if (agent === "gemini") return runGemini(prompt, chatId, session, abort, onProgress, stream);
   throw new Error(`unknown agent: ${agent}`);
 }
 
@@ -1176,6 +1208,18 @@ async function handleMessage(msg: TgMessage): Promise<void> {
     log("info", `denied user_id=${userId}`);
     audit.write({ chatId, userId, type: "error", data: { kind: "unauthorized" } });
     await sendMessage(chatId, "권한이 없습니다.");
+    return;
+  }
+
+  // Rate limit BEFORE any expensive work (typing indicator, downloads,
+  // agent spawn). A runaway sender hits the limiter and gets a polite
+  // wait estimate without ever touching the agent dispatcher.
+  const decision = rateLimiter.check(chatId);
+  if (!decision.ok) {
+    const seconds = Math.ceil(decision.retryAfterMs / 1000);
+    log("info", `rate limited chat=${chatId} retry_in=${seconds}s`);
+    audit.write({ chatId, userId, type: "error", data: { kind: "rate_limited", retry_after_ms: decision.retryAfterMs } });
+    await sendMessage(chatId, `⏳ 너무 빠릅니다. ${seconds}초 후 다시 시도해주세요.`);
     return;
   }
 

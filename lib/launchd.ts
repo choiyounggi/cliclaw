@@ -137,23 +137,42 @@ export function install(opts: LaunchdOptions): InstallResult {
   writeFileSync(path, renderPlist(label, opts), { mode: 0o644 });
 
   // bootout any existing copy so reinstalls pick up new env vars.
+  let booted = false;
   try {
     execFileSync("launchctl", ["bootout", domainTarget(label)], {
       stdio: "ignore",
     });
+    booted = true;
   } catch {
     // Not loaded yet — fine.
   }
-  try {
-    execFileSync("launchctl", ["bootstrap", domain(), path], {
-      stdio: "ignore",
-    });
-  } catch (e) {
+
+  // launchctl bootout returns before the service slot is actually free —
+  // a tight `bootout && bootstrap` pair routinely races with "Bootstrap
+  // failed: 5: Input/output error" on the second call. Sleep + retry on
+  // EBUSY-like failures so users who run
+  // `cliclaw uninstall-launchd && cliclaw install-launchd` as one line
+  // don't have to manually re-run.
+  const attempts = booted ? 3 : 1;
+  let lastErr: unknown;
+  for (let i = 0; i < attempts; i++) {
+    if (i > 0) sleepSync(700);
+    try {
+      execFileSync("launchctl", ["bootstrap", domain(), path], {
+        stdio: "ignore",
+      });
+      lastErr = null;
+      break;
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  if (lastErr) {
     return {
       label,
       path,
       loaded: false,
-      message: `wrote ${path} but bootstrap failed: ${(e as Error).message}`,
+      message: `wrote ${path} but bootstrap failed after ${attempts} attempt(s): ${(lastErr as Error).message}`,
     };
   }
   return {
@@ -186,6 +205,19 @@ function uid(): number {
 
 function domain(): string {
   return `gui/${uid()}`;
+}
+
+/** Block the current thread for `ms` milliseconds. We need a true sync
+ *  pause inside the bootout/bootstrap retry loop — async sleep would
+ *  let the caller's await chain unwind in the middle of an atomic
+ *  "reinstall LaunchAgent" operation. */
+function sleepSync(ms: number): void {
+  const end = Date.now() + ms;
+  // Bun's Atomics.wait works on a shared int32; a fresh SAB is fine.
+  const buf = new Int32Array(new SharedArrayBuffer(4));
+  while (Date.now() < end) {
+    Atomics.wait(buf, 0, 0, Math.max(0, end - Date.now()));
+  }
 }
 
 function domainTarget(label: string): string {
