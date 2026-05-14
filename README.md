@@ -87,6 +87,7 @@ All set.
 | `/stop` | 현재 채팅의 진행 중 작업 취소 (SIGTERM → 5s 후 SIGKILL) |
 | `/reset` | 현재 active 에이전트 세션만 폐기 |
 | `/reset all` | 이 채팅의 모든 에이전트 세션 폐기 |
+| `/safety` | 안전모드 상태 확인 — `/safety on` 또는 `/safety off` 로 토글 |
 | `/start` `/help` | 도움말 |
 | 그 외 텍스트 / 사진 | active 에이전트에 프롬프트 전달 (사진은 자동 다운로드 후 경로가 프롬프트 앞에 주입됨) |
 
@@ -128,6 +129,8 @@ CLICLAW_HOME=~/my-bot cliclaw init
 Bash 도구 호출 시 PreToolUse 훅이 봇에 IPC로 질의 → 텔레그램 inline keyboard `[✅ 허용] [❌ 거부]` 표시 → 무응답 시 자동 거부.
 
 기본 패턴: `rm -rf`, `git push --force`, DROP/TRUNCATE, `kubectl delete`, AWS `delete-*`, `sudo`, `curl|sh` 등. `confirmGate.extraPatterns` 로 사용자 정의 regex 추가 가능.
+
+**런타임 토글** (`/safety on` · `/safety off`): 이미 본인 환경에 외부 가드(예: `pre-bash-guard`, EDR)가 있어 봇의 confirm 프롬프트가 중복으로 느껴지면 텔레그램에서 한 줄로 OFF. OFF 상태에서도 모든 IPC 요청은 audit 로그(`logs/audit.jsonl`)에 `decision: allow, reason: safety_off` 로 기록됩니다. 상태는 `$CLICLAW_HOME/safety.json` 에 영속화되어 재시작 후에도 유지.
 
 ### 3. 응답 스트리밍 (Claude)
 `--include-partial-messages` 의 `text_delta` 를 받아 `editMessageText` 로 실시간 갱신. 1.5초 디바운스. 3800자 넘으면 새 메시지로 롤오버.
@@ -197,6 +200,10 @@ bun run test
 - 음성/파일 첨부 X (사진만).
 - 동일 채팅 내 동시 메시지는 거부 (`/stop` 또는 종료 대기).
 - macOS only.
+
+## 변경 이력
+
+버전별 변경사항은 [GitHub Releases](https://github.com/choiyounggi/cliclaw/releases) 에 정리되어 있습니다.
 
 ## 라이선스
 
