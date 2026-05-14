@@ -16,7 +16,7 @@
 import { resolve, dirname, join } from "node:path";
 import { spawn } from "node:child_process";
 import { homedir } from "node:os";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 
 import * as launchd from "./lib/launchd.ts";
 import { resolveCliPath } from "./lib/resolve-cli-path.ts";
@@ -88,14 +88,25 @@ function cmdStart(extra: string[]): void {
 }
 
 function cmdInstallLaunchd(): void {
-  if (!existsSync(join(HOME, "config.json"))) {
-    console.error(`No config at ${HOME}/config.json — run \`cliclaw init\` first.`);
+  const configPath = join(HOME, "config.json");
+  if (!existsSync(configPath)) {
+    console.error(`No config at ${configPath} — run \`cliclaw init\` first.`);
     process.exit(1);
   }
+  // Pick up any extra env the user configured at init time (NODE_EXTRA_CA_CERTS
+  // etc.) so re-installing the LaunchAgent doesn't silently drop them.
+  let extraEnv: Record<string, string> | undefined;
+  try {
+    const cfg = JSON.parse(readFileSync(configPath, "utf8"));
+    if (cfg.launchd?.extraEnv && typeof cfg.launchd.extraEnv === "object") {
+      extraEnv = cfg.launchd.extraEnv;
+    }
+  } catch { /* missing or unreadable — proceed with no extras */ }
   const result = launchd.install({
     entryTs: ENTRY_TS,
     bunPath: BUN_PATH,
     cliclawHome: HOME,
+    extraEnv,
   });
   console.log(result.message);
   if (!result.loaded) process.exit(1);

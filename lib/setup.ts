@@ -39,14 +39,14 @@ export async function runInit(opts: SetupOptions): Promise<void> {
     info(`Bot source: ${opts.entryTs}`);
 
     // ── Step 1: Telegram token ────────────────────────────────────────
-    section("Step 1/4 — Telegram bot token");
+    section("Step 1/5 — Telegram bot token");
     info("Get one from @BotFather (/newbot) on Telegram.");
     const token = await promptToken(rl);
     const me = await getMe(token);
     ok(`@${me.username} (id=${me.id}) verified`);
 
     // ── Step 2: Detect installed agents ───────────────────────────────
-    section("Step 2/4 — Detect installed coding agents");
+    section("Step 2/5 — Detect installed coding agents");
     const detected = detectAgents();
     for (const a of AGENTS) {
       const found = detected[a];
@@ -62,7 +62,7 @@ export async function runInit(opts: SetupOptions): Promise<void> {
     ok(`Default agent: ${defaultAgent}`);
 
     // ── Step 3: Authorize Telegram account ────────────────────────────
-    section("Step 3/4 — Authorize your Telegram account");
+    section("Step 3/5 — Authorize your Telegram account");
     info(`Open Telegram and send any message to @${me.username} now.`);
     info("Waiting up to 5 minutes... press Ctrl-C to abort.");
     const userId = await waitForFirstMessage(token);
@@ -73,17 +73,25 @@ export async function runInit(opts: SetupOptions): Promise<void> {
       process.exit(1);
     }
 
+    // ── Step 4: Corporate TLS CA (optional) ───────────────────────────
+    section("Step 4/5 — Corporate TLS interceptor (선택)");
+    info("회사망에서 Zscaler / Forticlient / Cisco Umbrella 등이 HTTPS 를 가로채면");
+    info("Node 가 Telegram 인증서를 신뢰하지 못해 봇이 메시지를 받을 수 없습니다.");
+    info("해당 환경이면 CA 인증서(.pem) 경로를 알려주세요 — 봇 LaunchAgent 에만 적용됩니다.");
+    const caCert = await detectCaCert(rl);
+
     // ── Write config.json ─────────────────────────────────────────────
     writeConfig(opts.home, {
       token,
       allowedUserIds: [userId],
       defaultAgent,
       detected,
+      caCert,
     });
     ok(`Wrote ${join(opts.home, "config.json")} (chmod 600)`);
 
-    // ── Step 4: Auto-start at login (optional) ────────────────────────
-    section("Step 4/4 — Auto-start at login (launchd)");
+    // ── Step 5: Auto-start at login (optional) ────────────────────────
+    section("Step 5/5 — Auto-start at login (launchd)");
     const wantLaunchd = await yesNo(
       rl,
       "Install LaunchAgent so the bot starts automatically on login?",
@@ -94,6 +102,7 @@ export async function runInit(opts: SetupOptions): Promise<void> {
         entryTs: opts.entryTs,
         bunPath: opts.bunPath,
         cliclawHome: opts.home,
+        extraEnv: caCert ? { NODE_EXTRA_CA_CERTS: caCert } : undefined,
       });
       if (result.loaded) {
         ok(`Installed ${result.path}`);
@@ -152,6 +161,59 @@ async function yesNo(
   const ans = (await rl.question(`${question} ${hint} `)).trim().toLowerCase();
   if (!ans) return defaultYes;
   return ans.startsWith("y");
+}
+
+/**
+ * Probe for a TLS interceptor CA cert that the bot's launchd process should
+ * trust. Tries in order: $NODE_EXTRA_CA_CERTS, `launchctl getenv …`, then
+ * a manual prompt as a final fallback. Paths containing placeholder text
+ * like `<username>` are rejected up front — those are a common artifact of
+ * a half-customized internal install script and would silently fail at
+ * runtime instead of obviously here.
+ */
+async function detectCaCert(
+  rl: ReturnType<typeof createInterface>,
+): Promise<string | null> {
+  const candidates: { value: string; source: string }[] = [];
+  if (process.env.NODE_EXTRA_CA_CERTS) {
+    candidates.push({ value: process.env.NODE_EXTRA_CA_CERTS, source: "$NODE_EXTRA_CA_CERTS" });
+  }
+  try {
+    const v = execFileSync("launchctl", ["getenv", "NODE_EXTRA_CA_CERTS"], {
+      encoding: "utf8",
+      timeout: 2000,
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    if (v) candidates.push({ value: v, source: "launchctl getenv" });
+  } catch { /* not set — fine */ }
+
+  for (const c of candidates) {
+    if (/[<>]/.test(c.value)) {
+      warn(`${c.source}: 잘못된 placeholder가 포함된 경로라 건너뜁니다 (${c.value})`);
+      continue;
+    }
+    if (!existsSync(c.value)) {
+      warn(`${c.source}: 파일이 존재하지 않아 건너뜁니다 (${c.value})`);
+      continue;
+    }
+    info(`${c.source}: ${c.value}`);
+    if (await yesNo(rl, "이 CA 인증서를 봇의 LaunchAgent 환경에 적용할까요?", true)) {
+      return c.value;
+    }
+    return null;
+  }
+
+  const manual = (await rl.question("CA 경로 (없으면 Enter): ")).trim();
+  if (!manual) return null;
+  if (/[<>]/.test(manual)) {
+    warn("경로에 placeholder 문자(< 또는 >)가 있어 적용하지 않습니다.");
+    return null;
+  }
+  if (!existsSync(manual)) {
+    warn(`파일을 찾을 수 없습니다: ${manual} — 적용하지 않습니다.`);
+    return null;
+  }
+  return manual;
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -253,6 +315,8 @@ interface WriteConfigArgs {
   allowedUserIds: number[];
   defaultAgent: SupportedCli;
   detected: Partial<Record<SupportedCli, AgentInfo>>;
+  /** Optional NODE_EXTRA_CA_CERTS path for the bot's launchd env. */
+  caCert: string | null;
 }
 
 function writeConfig(home: string, args: WriteConfigArgs): void {
@@ -295,6 +359,16 @@ function writeConfig(home: string, args: WriteConfigArgs): void {
     logLevel: existing.logLevel ?? "info",
     confirmGate: existing.confirmGate ?? { enabled: true, pendingTimeoutMs: 300_000 },
     streaming: existing.streaming ?? { enabled: true },
+    // launchd.extraEnv persists user choices like NODE_EXTRA_CA_CERTS so a
+    // later `cliclaw install-launchd` (after an uninstall, after a version
+    // bump, etc.) can recreate the plist with the same env without having
+    // to re-run the full `init` wizard.
+    launchd: {
+      ...(existing.launchd ?? {}),
+      extraEnv: args.caCert
+        ? { ...(existing.launchd?.extraEnv ?? {}), NODE_EXTRA_CA_CERTS: args.caCert }
+        : existing.launchd?.extraEnv,
+    },
   };
 
   writeFileSync(configPath, JSON.stringify(config, null, 2), { mode: 0o600 });

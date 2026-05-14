@@ -26,6 +26,13 @@ export interface LaunchdOptions {
   cliclawHome: string;
   /** Additional PATH entries to prepend before the default macOS PATH. */
   extraPath?: string[];
+  /**
+   * Extra environment variables to write into the plist's
+   * EnvironmentVariables dict. Typical usage: a corporate TLS interceptor
+   * root CA path via NODE_EXTRA_CA_CERTS, so the bot's getMe call to
+   * Telegram doesn't trip "unable to get local issuer certificate".
+   */
+  extraEnv?: Record<string, string>;
 }
 
 export function defaultLabel(): string {
@@ -73,7 +80,7 @@ export function renderPlist(label: string, opts: LaunchdOptions): string {
         <key>HOME</key>
         <string>${escape(homedir())}</string>
         <key>CLICLAW_HOME</key>
-        <string>${escape(stateDir)}</string>
+        <string>${escape(stateDir)}</string>${renderExtraEnv(opts.extraEnv)}
     </dict>
     <key>RunAtLoad</key>
     <true/>
@@ -93,6 +100,18 @@ export function renderPlist(label: string, opts: LaunchdOptions): string {
 </dict>
 </plist>
 `;
+}
+
+/** Render arbitrary user-supplied env vars as plist key/string pairs.
+ *  Returns the empty string when no extras are provided so the template
+ *  still produces clean plist output. */
+function renderExtraEnv(extra: Record<string, string> | undefined): string {
+  if (!extra) return "";
+  const entries = Object.entries(extra);
+  if (entries.length === 0) return "";
+  return "\n" + entries
+    .map(([k, v]) => `        <key>${escape(k)}</key>\n        <string>${escape(v)}</string>`)
+    .join("\n");
 }
 
 /** Escape characters that have meaning inside plist XML strings. */
