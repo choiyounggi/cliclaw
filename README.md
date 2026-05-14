@@ -205,6 +205,30 @@ bun run test
 
 버전별 변경사항은 [GitHub Releases](https://github.com/choiyounggi/cliclaw/releases) 에 정리되어 있습니다.
 
+## 릴리스 자동화 (maintainer)
+
+새 버전 publish 흐름:
+
+```bash
+# 1) 버전 bump (commit + tag 자동 생성)
+npm version patch          # 또는 minor / major
+
+# 2) commit + tag 푸시
+git push --follow-tags
+
+# 3) GitHub Release 발행 (CLI)
+gh release create "v$(node -p 'require(\"./package.json\").version')" \
+  --title "v$(node -p 'require(\"./package.json\").version')" \
+  --notes "$(git log -1 --pretty=%B)"
+# 또는 https://github.com/choiyounggi/cliclaw/releases/new 에서 웹 UI로 작성
+```
+
+3번 시점에 `.github/workflows/publish.yml` 이 자동 실행되어 `npm publish --access public` 까지 끝냅니다. 워크플로는 release tag 이름과 `package.json` version 일치를 먼저 검증하므로, 두 값이 어긋나 있으면 publish하지 않고 fail합니다.
+
+**사전 등록 필요** (한 번만): repo Settings → Secrets and variables → Actions → **NPM_TOKEN** 에 npm Automation Token 등록.
+1. <https://www.npmjs.com/settings/younggichoi/tokens/new> → Classic Token → **Automation** (2FA bypass 자동)
+2. 발급된 `npm_…` 토큰을 GitHub Actions secret 으로 추가
+
 ## 라이선스
 
 MIT. `LICENSE` 참조.

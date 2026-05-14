@@ -1,0 +1,53 @@
+# Publish @younggichoi/cliclaw to npm whenever a GitHub Release is published.
+#
+# Triggered by Release (not tag push) so that a stray `git push --follow-tags`
+# from a working branch cannot accidentally publish — Releases are an
+# explicit, reviewable artifact.
+#
+# Requires a repository secret named NPM_TOKEN. Use an npm "Automation"
+# token (Classic Token type) so 2FA does not block the workflow. Generate
+# at https://www.npmjs.com/settings/younggichoi/tokens/new and store via
+# Settings → Secrets and variables → Actions → New repository secret.
+
+name: Publish to npm
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node + npm registry auth
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      # Refuse to publish if the Release tag and package.json version disagree
+      # (e.g. user forgot to run `npm version` before creating the Release).
+      # Fail-fast is preferable to publishing the wrong artifact.
+      - name: Verify tag matches package.json version
+        run: |
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          echo "package.json: $PKG_VERSION"
+          echo "release tag : $TAG_VERSION"
+          if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::Tag '$TAG_VERSION' does not match package.json '$PKG_VERSION'. Bump package.json or retag before publishing."
+            exit 1
+          fi
+
+      - name: Publish
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
