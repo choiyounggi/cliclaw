@@ -1,5 +1,16 @@
 # cliclaw
 
+<p>
+  <a href="https://github.com/choiyounggi/cliclaw/actions/workflows/test.yml"><img alt="Test" src="https://github.com/choiyounggi/cliclaw/actions/workflows/test.yml/badge.svg"></a>
+  <a href="https://www.npmjs.com/package/@younggichoi/cliclaw"><img alt="npm" src="https://img.shields.io/npm/v/@younggichoi/cliclaw?logo=npm"></a>
+  <a href="https://www.npmjs.com/package/@younggichoi/cliclaw"><img alt="downloads" src="https://img.shields.io/npm/dm/@younggichoi/cliclaw?logo=npm&label=downloads"></a>
+  <img alt="platform" src="https://img.shields.io/badge/platform-macOS-blue">
+  <img alt="runtime" src="https://img.shields.io/badge/runtime-Bun%201.x-black?logo=bun">
+  <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-MIT-green"></a>
+</p>
+
+> **English**: A Telegram bot that drives four local coding CLIs (Claude Code / Codex / Pi / Gemini) from your phone, with per-chat sessions, a confirm gate for dangerous commands, automatic launchd, and corporate TLS auto-detection. Korean is the primary UX language — pull-requests welcome for English copy.
+
 네 가지 로컬 코딩 CLI(**Claude Code · Codex · Pi · Gemini**)를 텔레그램에서 바꿔가며 쓸 수 있게 해주는 단일 데몬.
 
 채팅마다 에이전트별 세션을 독립적으로 유지하고, 위험 명령에 대한 confirm 게이트, 응답 스트리밍, 이미지 첨부 처리, 회사망(Zscaler 등) TLS 인터셉터 자동 감지까지 지원합니다.
@@ -92,6 +103,7 @@ All set.
 |---|---|
 | `/claude` `/codex` `/pi` `/gemini` | 이 채팅의 active 에이전트 전환 (설치 안 된 에이전트는 자동 숨김) |
 | `/status` | 에이전트별 세션 상태 + 진행 중 작업 표시 |
+| `/health` | 봇 시스템 상태 (가동시간, 메모리, 로그 크기, 채팅·작업 수) |
 | `/stop` | 현재 채팅의 진행 중 작업 취소 (SIGTERM → 5s 후 SIGKILL) |
 | `/reset` | 현재 active 에이전트 세션만 폐기 |
 | `/reset all` | 이 채팅의 모든 에이전트 세션 폐기 |
@@ -264,6 +276,12 @@ git push --follow-tags
 1. <https://www.npmjs.com/package/@younggichoi/cliclaw/access> 에서 Trusted Publisher → GitHub Actions 추가 (workflow filename: `publish.yml`)
 2. `.github/workflows/publish.yml` 에 `permissions: id-token: write` 추가 + `NODE_AUTH_TOKEN` 제거 + `--provenance` 플래그 추가
 3. 기존 NPM_TOKEN secret 삭제
+
+## 기여 및 보안
+
+- 코드 기여: [CONTRIBUTING.md](CONTRIBUTING.md)
+- 개발 흐름·디렉토리 구조: [DEVELOPMENT.md](DEVELOPMENT.md)
+- 보안 정책·위협 모델·취약점 보고: [SECURITY.md](SECURITY.md)
 
 ## 라이선스
 

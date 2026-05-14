@@ -34,6 +34,12 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      # Tests park scratch dirs under .claude/tmp/ because the host's
+      # security policy forbids /tmp writes. Fresh CI checkouts don't
+      # have this directory yet, so create it explicitly.
+      - name: Prepare scratch directory
+        run: mkdir -p .claude/tmp
+
       - name: Type check
         run: bun --bun x tsc --noEmit
 

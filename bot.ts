@@ -1103,6 +1103,7 @@ function helpText(active: Agent): string {
     "  /reset      — 현재 에이전트 세션 초기화",
     "  /reset all  — 이 채팅의 모든 에이전트 세션 초기화",
     "  /status     — 에이전트별 세션 상태 + 진행 중 작업 표시",
+    "  /health     — 봇 헬스 (가동시간, 메모리, 로그 크기)",
     "  /stop       — 진행 중 작업 취소",
     "  /safety     — 안전모드 상태 (/safety on · off로 토글)",
     "  /help       — 이 도움말",
@@ -1117,6 +1118,66 @@ function fmtMs(ms: number | undefined): string {
   if (!ms) return "—";
   if (ms >= 60_000) return `${Math.round(ms / 60_000)}m`;
   return `${Math.round(ms / 1000)}s`;
+}
+
+const BOOT_AT = Date.now();
+
+/** Format milliseconds as a human-readable duration ("3m 12s"). */
+function fmtUptime(ms: number): string {
+  const s = Math.floor(ms / 1000);
+  const d = Math.floor(s / 86400);
+  const h = Math.floor((s % 86400) / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const rest = s % 60;
+  const parts: string[] = [];
+  if (d) parts.push(`${d}d`);
+  if (h) parts.push(`${h}h`);
+  if (m) parts.push(`${m}m`);
+  parts.push(`${rest}s`);
+  return parts.join(" ");
+}
+
+/** Format byte count compactly (KB / MB / GB). */
+function fmtBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
+/** System-wide health snapshot: uptime, memory, log sizes, active chats. */
+function healthText(): string {
+  const uptime = fmtUptime(Date.now() - BOOT_AT);
+  const mem = process.memoryUsage();
+  const rss = fmtBytes(mem.rss);
+  const heap = `${fmtBytes(mem.heapUsed)} / ${fmtBytes(mem.heapTotal)}`;
+
+  let logSize = 0, auditSize = 0, errSize = 0;
+  try { logSize = statSync(LOG_FILE).size; } catch { /* missing — fine */ }
+  try { auditSize = statSync(AUDIT_FILE).size; } catch { /* missing — fine */ }
+  try { errSize = statSync(join(HOME, "logs", "bot.err")).size; } catch { /* missing — fine */ }
+
+  const activeChats = Object.keys(store).length;
+  const inFlight = jobs.size();
+
+  const lines = [
+    "🩺 cliclaw 헬스",
+    "",
+    `가동시간: ${uptime}`,
+    `메모리: RSS ${rss}, heap ${heap}`,
+    `에이전트 활성: ${AGENT_NAMES.join(", ")} (총 ${AGENT_NAMES.length}/${ALL_AGENTS.length})`,
+    `활성 채팅: ${activeChats}`,
+    `진행 중 작업: ${inFlight}`,
+    "",
+    "로그:",
+    `  bot.log    ${fmtBytes(logSize)}`,
+    `  audit.json ${fmtBytes(auditSize)}`,
+    `  bot.err    ${fmtBytes(errSize)}`,
+    "",
+    `안전모드: ${safetyLabel()}`,
+    confirmServer ? `위험명령 게이트 대기: ${confirmServer.pendingCount()}` : "위험명령 게이트: OFF (config)",
+  ];
+  return lines.join("\n");
 }
 
 function statusText(chat: ChatState, chatId: number): string {
@@ -1266,6 +1327,12 @@ async function handleMessage(msg: TgMessage): Promise<void> {
   if (text === "/status") {
     audit.write({ chatId, userId, type: "cmd", data: { cmd: "status" } });
     await sendMessage(chatId, statusText(chat, chatId));
+    return;
+  }
+
+  if (text === "/health") {
+    audit.write({ chatId, userId, type: "cmd", data: { cmd: "health" } });
+    await sendMessage(chatId, healthText());
     return;
   }
 
