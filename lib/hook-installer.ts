@@ -21,7 +21,97 @@ interface HookConfig {
     PostToolUse?: unknown[];
     [k: string]: unknown;
   };
+  permissions?: {
+    allow?: string[];
+    ask?: string[];
+    deny?: string[];
+    defaultMode?: string;
+    [k: string]: unknown;
+  };
   [k: string]: unknown;
+}
+
+/**
+ * Patterns Claude should refuse to read while safety mode is ON. These
+ * cover the common credential / secret material a curious agent might
+ * sweep up while doing innocent-looking work. The list is intentionally
+ * broader than the user's existing global ~/.claude/settings.json so a
+ * fresh workspace install gets sane defaults even if the user never
+ * customized that file.
+ */
+export const SAFETY_DENY_PATTERNS: readonly string[] = [
+  "Read(~/.ssh/**)",
+  "Read(~/.aws/**)",
+  "Read(~/.gnupg/**)",
+  "Read(~/.netrc)",
+  "Read(~/.npmrc)",
+  "Read(./**/.env)",
+  "Read(./**/.env.*)",
+  "Read(./**/*.pem)",
+  "Read(./**/*_rsa)",
+  "Read(./**/*_dsa)",
+  "Read(./**/*_ed25519)",
+  "Read(./**/id_rsa*)",
+  "Read(./**/id_ed25519*)",
+  "Read(./secrets/**)",
+];
+
+/** A tag we embed in the workspace settings so we can remove only the
+ *  patterns we put there without disturbing anything the user added. */
+const SAFETY_MARKER_KEY = "__cliclaw_safety_managed__";
+
+/** Render the merged config that ADDS our safety deny patterns. Idempotent. */
+export function mergeSafetyDeny(existingPath: string): string {
+  const existing = readJsonSafe(existingPath);
+  const cfg: HookConfig = { ...existing };
+  const perms = { ...(cfg.permissions ?? {}) };
+  const deny = new Set<string>(Array.isArray(perms.deny) ? perms.deny : []);
+  for (const p of SAFETY_DENY_PATTERNS) deny.add(p);
+  perms.deny = Array.from(deny);
+  // Mark which patterns are ours so a later removeSafetyDeny() leaves the
+  // user's hand-added deny rules in place.
+  (perms as Record<string, unknown>)[SAFETY_MARKER_KEY] = [...SAFETY_DENY_PATTERNS];
+  cfg.permissions = perms;
+  return JSON.stringify(cfg, null, 2);
+}
+
+/** Render the merged config that REMOVES only our marked safety deny
+ *  patterns. Anything the user added by hand stays untouched. */
+export function mergeSafetyDenyRemoval(existingPath: string): string {
+  const existing = readJsonSafe(existingPath);
+  const cfg: HookConfig = { ...existing };
+  if (!cfg.permissions) return JSON.stringify(cfg, null, 2);
+  const perms = { ...cfg.permissions };
+  const managed = Array.isArray((perms as Record<string, unknown>)[SAFETY_MARKER_KEY])
+    ? ((perms as Record<string, unknown>)[SAFETY_MARKER_KEY] as string[])
+    : (SAFETY_DENY_PATTERNS as readonly string[]);
+  const managedSet = new Set(managed);
+  perms.deny = Array.isArray(perms.deny) ? perms.deny.filter((p) => !managedSet.has(p)) : [];
+  if (perms.deny.length === 0) delete perms.deny;
+  delete (perms as Record<string, unknown>)[SAFETY_MARKER_KEY];
+  cfg.permissions = perms;
+  // If `permissions` became an empty object, drop it entirely so the
+  // resulting settings.json doesn't carry useless scaffolding.
+  if (Object.keys(perms).length === 0) delete cfg.permissions;
+  return JSON.stringify(cfg, null, 2);
+}
+
+export function installSafetyDeny(targetPath: string): void {
+  const merged = mergeSafetyDeny(targetPath);
+  mkdirSync(dirname(targetPath), { recursive: true });
+  writeFileSync(targetPath, merged);
+}
+
+export function uninstallSafetyDeny(targetPath: string): void {
+  if (!existsSync(targetPath)) return;
+  const merged = mergeSafetyDenyRemoval(targetPath);
+  writeFileSync(targetPath, merged);
+}
+
+function readJsonSafe(path: string): HookConfig {
+  if (!existsSync(path)) return {};
+  try { return JSON.parse(readFileSync(path, "utf8")) as HookConfig; }
+  catch { return {}; }
 }
 
 /**

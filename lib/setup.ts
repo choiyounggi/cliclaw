@@ -356,7 +356,12 @@ function writeConfig(home: string, args: WriteConfigArgs): void {
       gemini: {
         path: args.detected.gemini?.path ?? "",
         model: existing.agents?.gemini?.model ?? null,
-        approvalMode: existing.agents?.gemini?.approvalMode ?? "yolo",
+        // Default to auto_edit (auto-approve edit tools, prompt on
+        // destructive ones) rather than yolo (auto-approve everything).
+        // Gemini does not yet integrate with cliclaw's bash-confirm IPC
+        // so a stronger upstream default is the only line of defense
+        // for shell-level actions.
+        approvalMode: existing.agents?.gemini?.approvalMode ?? "auto_edit",
         maxTurns: existing.agents?.gemini?.maxTurns ?? 50,
       },
     },

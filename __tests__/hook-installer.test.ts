@@ -1,7 +1,15 @@
 import { describe, it, expect } from "vitest";
 import { mkdtempSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { mergeBashConfirmHook, installBashConfirmHook } from "../lib/hook-installer.ts";
+import {
+  mergeBashConfirmHook,
+  installBashConfirmHook,
+  mergeSafetyDeny,
+  mergeSafetyDenyRemoval,
+  installSafetyDeny,
+  uninstallSafetyDeny,
+  SAFETY_DENY_PATTERNS,
+} from "../lib/hook-installer.ts";
 
 function tmpFile(name: string): string {
   const dir = mkdtempSync(join(process.cwd(), ".claude/tmp/hook-inst-"));
@@ -69,5 +77,85 @@ describe("installBashConfirmHook", () => {
     expect(existsSync(f)).toBe(true);
     const obj = JSON.parse(readFileSync(f, "utf8"));
     expect(obj.hooks.PreToolUse[0].matcher).toBe("Bash");
+  });
+});
+
+describe("mergeSafetyDeny", () => {
+  it("adds every SAFETY_DENY_PATTERNS entry to permissions.deny", () => {
+    const merged = JSON.parse(mergeSafetyDeny(tmpFile("safety-fresh.json")));
+    for (const p of SAFETY_DENY_PATTERNS) {
+      expect(merged.permissions.deny).toContain(p);
+    }
+  });
+
+  it("preserves user-added deny rules", () => {
+    const f = tmpFile("safety-userdeny.json");
+    writeFileSync(f, JSON.stringify({
+      permissions: { deny: ["Bash(rm -rf /opt/sacred/**)"] },
+    }));
+    const merged = JSON.parse(mergeSafetyDeny(f));
+    expect(merged.permissions.deny).toContain("Bash(rm -rf /opt/sacred/**)");
+    for (const p of SAFETY_DENY_PATTERNS) {
+      expect(merged.permissions.deny).toContain(p);
+    }
+  });
+
+  it("is idempotent — running twice produces the same deny set", () => {
+    const f = tmpFile("safety-idem.json");
+    const once = JSON.parse(mergeSafetyDeny(f));
+    writeFileSync(f, JSON.stringify(once));
+    const twice = JSON.parse(mergeSafetyDeny(f));
+    expect(twice.permissions.deny.length).toBe(once.permissions.deny.length);
+  });
+
+  it("survives a corrupt existing file", () => {
+    const f = tmpFile("safety-corrupt.json");
+    writeFileSync(f, "{ broken: yes");
+    const merged = JSON.parse(mergeSafetyDeny(f));
+    expect(merged.permissions.deny.length).toBeGreaterThan(0);
+  });
+});
+
+describe("mergeSafetyDenyRemoval", () => {
+  it("removes only managed patterns, keeps user patterns", () => {
+    const f = tmpFile("safety-remove.json");
+    // First install our rules on top of a user rule.
+    writeFileSync(f, JSON.stringify({
+      permissions: { deny: ["Bash(rm -rf /opt/sacred/**)"] },
+    }));
+    writeFileSync(f, mergeSafetyDeny(f));
+    // Now remove.
+    const after = JSON.parse(mergeSafetyDenyRemoval(f));
+    expect(after.permissions.deny).toContain("Bash(rm -rf /opt/sacred/**)");
+    for (const p of SAFETY_DENY_PATTERNS) {
+      expect(after.permissions.deny ?? []).not.toContain(p);
+    }
+  });
+
+  it("drops permissions entirely when nothing user-supplied remains", () => {
+    const f = tmpFile("safety-empty-after.json");
+    writeFileSync(f, mergeSafetyDeny(f));
+    const after = JSON.parse(mergeSafetyDenyRemoval(f));
+    expect(after.permissions).toBeUndefined();
+  });
+
+  it("is a no-op when settings file doesn't exist", () => {
+    const f = join(process.cwd(), ".claude/tmp/safety-remove-nonexistent.json");
+    expect(() => uninstallSafetyDeny(f)).not.toThrow();
+    expect(existsSync(f)).toBe(false);
+  });
+});
+
+describe("installSafetyDeny → uninstallSafetyDeny round trip", () => {
+  it("creates parent dirs, writes, then leaves user state behind", () => {
+    const f = join(process.cwd(), ".claude/tmp/safety-roundtrip/nested/settings.json");
+    installSafetyDeny(f);
+    expect(existsSync(f)).toBe(true);
+    const obj = JSON.parse(readFileSync(f, "utf8"));
+    expect(obj.permissions.deny.length).toBeGreaterThan(0);
+
+    uninstallSafetyDeny(f);
+    const after = JSON.parse(readFileSync(f, "utf8"));
+    expect(after.permissions).toBeUndefined();
   });
 });

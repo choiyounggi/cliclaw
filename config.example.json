@@ -24,7 +24,7 @@
     "gemini": {
       "path": "",
       "model": null,
-      "approvalMode": "yolo",
+      "approvalMode": "auto_edit",
       "maxTurns": 50
     }
   },

@@ -24,7 +24,11 @@ import { createAuditWriter, type AuditWriter } from "./lib/audit-log.ts";
 import { runSubprocessStream } from "./lib/subprocess-stream.ts";
 import { parseClaudeStreamLine, detectProgressLine, stripAnsi } from "./lib/stream-parser.ts";
 import { ConfirmServer, type ConfirmRequest } from "./lib/confirm-server.ts";
-import { installBashConfirmHook } from "./lib/hook-installer.ts";
+import {
+  installBashConfirmHook,
+  installSafetyDeny,
+  uninstallSafetyDeny,
+} from "./lib/hook-installer.ts";
 import { createStreamingMessage, type StreamingMessage } from "./lib/telegram-stream.ts";
 import { createToolIndicator, type ToolIndicator } from "./lib/tool-indicator.ts";
 import { markdownToTelegramHtml } from "./lib/telegram-html.ts";
@@ -176,7 +180,7 @@ if (!config.token || config.token.startsWith("PASTE_")) {
     claude: () => ({ path: "", model: "sonnet", maxTurns: 100 }),
     codex:  () => ({ path: "", model: null, sandbox: "workspace-write", maxTurns: 50 }),
     pi:     () => ({ path: "", model: null, provider: null, maxTurns: 50 }),
-    gemini: () => ({ path: "", model: null, approvalMode: "yolo", maxTurns: 50 }),
+    gemini: () => ({ path: "", model: null, approvalMode: "auto_edit", maxTurns: 50 }),
   };
   const agents = config.agents as unknown as Record<Agent, unknown>;
   for (const a of ALL_AGENTS) {
@@ -273,10 +277,31 @@ function agentModeLabel(agent: Agent): string {
 writeFileSync(EXTRA_PATTERNS_FILE, JSON.stringify(extraDangerPatterns));
 
 // ---------- logging ----------
+// Redact secrets before any log write. Telegram bot tokens and npm
+// automation tokens have predictable shapes — we mask both, plus the
+// exact `config.token` string in case a future fetch error embeds the
+// API URL verbatim. The redacted form keeps the first few chars so
+// audit logs are still useful for distinguishing tokens at a glance.
+const TG_TOKEN_RE = /\d{8,}:[A-Za-z0-9_-]{30,}/g;
+const NPM_TOKEN_RE = /npm_[A-Za-z0-9]{30,}/g;
+const GH_TOKEN_RE  = /gh[pousr]_[A-Za-z0-9]{30,}/g;
+
+function redact(msg: string): string {
+  let out = msg;
+  if (config?.token) {
+    out = out.split(config.token).join("[REDACTED:bot-token]");
+  }
+  out = out
+    .replace(TG_TOKEN_RE, (m) => `${m.slice(0, 6)}…[REDACTED:bot-token]`)
+    .replace(NPM_TOKEN_RE, "[REDACTED:npm-token]")
+    .replace(GH_TOKEN_RE, "[REDACTED:gh-token]");
+  return out;
+}
+
 function log(level: "debug" | "info" | "error", msg: string): void {
   const order = { debug: 0, info: 1, error: 2 };
   if (order[level] < order[config.logLevel]) return;
-  const line = `[${new Date().toISOString()}] ${level.toUpperCase()} ${msg}\n`;
+  const line = `[${new Date().toISOString()}] ${level.toUpperCase()} ${redact(msg)}\n`;
   process.stdout.write(line);
   try { appendFileSync(LOG_FILE, line); } catch {}
 }
@@ -834,12 +859,12 @@ async function runGemini(
   // running every chat from `config.cwd` would have them all stomp the
   // same "latest" session.
   const sessionDir = agentSessionDir("gemini", chatId);
-  // Approval mode default = yolo. Gemini doesn't currently integrate with
-  // our bash-confirm IPC hook (only Claude/Codex do), so the gate sitting
-  // in front of dangerous Bash commands is the user's host-level guard +
-  // allowedUserIds. Users who want narrower autonomy can set
-  // `agents.gemini.approvalMode` to "auto_edit" or "default".
-  const approval = c.approvalMode ?? "yolo";
+  // Approval mode default = auto_edit (edit tools auto-approved, shell &
+  // destructive ones prompt). Gemini doesn't yet integrate with cliclaw's
+  // bash-confirm IPC, so this upstream default is the only line of defense
+  // for shell-level actions until that integration lands. Users who want
+  // full autonomy can opt into "yolo" via config.agents.gemini.approvalMode.
+  const approval = c.approvalMode ?? "auto_edit";
   const args = [
     "-p", prompt,
     "--approval-mode", approval,
@@ -902,6 +927,25 @@ function ensureWorkspaceClaudeSettings(): void {
   const settingsPath = join(config.cwd, ".claude", "settings.json");
   try { installBashConfirmHook(settingsPath, `bun ${HOOK_SCRIPT}`); }
   catch (err) { log("error", `install claude workspace hook failed: ${err}`); }
+  applySafetyDenyRules();
+}
+
+/**
+ * Apply (or remove) Claude's permissions.deny rules for sensitive paths.
+ * Mirrors the live `safetyEnabled` flag, so toggling /safety on|off in
+ * Telegram updates the workspace settings.json without a bot restart.
+ * Confirm gate must be enabled at boot — when it isn't the hook isn't
+ * installed and these deny rules wouldn't be enforced by anyone either.
+ */
+function applySafetyDenyRules(): void {
+  if (!confirmGateEnabled) return;
+  const settingsPath = join(config.cwd, ".claude", "settings.json");
+  try {
+    if (safetyEnabled) installSafetyDeny(settingsPath);
+    else uninstallSafetyDeny(settingsPath);
+  } catch (err) {
+    log("error", `apply safety deny rules failed: ${err}`);
+  }
 }
 
 // ---------- message handler ----------
@@ -943,8 +987,8 @@ async function handleSafetyCommand(chatId: number, arg: string): Promise<void> {
   if (arg === "" || arg === "status") {
     const state = safetyEnabled ? "ON" : "OFF";
     const detail = safetyEnabled
-      ? "위험 명령(rm -rf · DROP · sudo · ssh prd-* …)이 텔레그램으로 다시 물어봅니다."
-      : "모든 Bash 명령이 즉시 실행됩니다. 본인 환경의 외부 가드(pre-bash-guard, EDR 등)에 위임된 상태입니다.";
+      ? "위험 Bash 명령은 텔레그램 confirm 으로 다시 묻고, Claude 의 Read 도구가 ~/.ssh · ~/.aws · .env · *.pem · id_rsa 등 민감 파일을 차단합니다."
+      : "모든 Bash 명령이 즉시 실행되고, 민감 파일 deny 룰도 비활성화됩니다. 본인 환경의 외부 가드(pre-bash-guard, EDR 등)에 위임된 상태입니다.";
     await sendMessage(chatId, `🛡 안전모드: ${state}\n${detail}\n\n사용: /safety on · /safety off`);
     return;
   }
@@ -952,18 +996,25 @@ async function handleSafetyCommand(chatId: number, arg: string): Promise<void> {
     if (safetyEnabled) { await sendMessage(chatId, "🛡 안전모드는 이미 ON 입니다."); return; }
     safetyEnabled = true;
     saveSafety(true);
+    applySafetyDenyRules();
     log("info", `safety: ON (chat=${chatId})`);
-    await sendMessage(chatId, "🛡 안전모드 ON. 위험 명령은 텔레그램으로 다시 묻습니다.");
+    await sendMessage(
+      chatId,
+      "🛡 안전모드 ON.\n" +
+        "• 위험 Bash 명령은 텔레그램 confirm 으로 다시 묻습니다.\n" +
+        "• Claude 의 Read 도구가 ~/.ssh, ~/.aws, .env, *.pem, id_rsa 등 민감 파일을 차단합니다.",
+    );
     return;
   }
   if (arg === "off") {
     if (!safetyEnabled) { await sendMessage(chatId, "🛡 안전모드는 이미 OFF 입니다."); return; }
     safetyEnabled = false;
     saveSafety(false);
+    applySafetyDenyRules();
     log("info", `safety: OFF (chat=${chatId})`);
     await sendMessage(
       chatId,
-      "🛡 안전모드 OFF. 모든 Bash 명령이 즉시 실행됩니다.\n" +
+      "🛡 안전모드 OFF. Bash 게이트 + 민감 파일 deny 룰이 비활성화됩니다.\n" +
         "본인 환경의 외부 가드(pre-bash-guard, EDR 등)가 위험 명령을 차단하는지 확인하세요.",
     );
     return;
