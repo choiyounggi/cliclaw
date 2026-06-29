@@ -1568,6 +1568,26 @@ async function pollLoop(): Promise<void> {
     log("error", `getMe failed — check token: ${err}`);
     process.exit(1);
   }
+
+  // Register the slash-command menu so Telegram shows the "/" autocomplete list.
+  // Persisted server-side; refreshed each boot so it tracks installed agents.
+  try {
+    await tg("setMyCommands", {
+      commands: [
+        ...AGENT_NAMES.map((a) => ({ command: a, description: `${a} 에이전트로 전환` })),
+        { command: "status", description: "에이전트별 세션 상태" },
+        { command: "reset", description: "현재 에이전트 세션 초기화" },
+        { command: "health", description: "봇 헬스 (가동시간/메모리)" },
+        { command: "stop", description: "진행 중 작업 취소" },
+        { command: "safety", description: "안전모드 상태/토글" },
+        { command: "help", description: "도움말" },
+      ],
+    });
+    log("info", "setMyCommands registered");
+  } catch (err) {
+    log("error", `setMyCommands failed: ${err}`);
+  }
+
   log("info", `agents=[${AGENT_NAMES.join(",")}] default=${config.defaultAgent} allowed=[${config.allowedUserIds.join(",")}] cwd=${config.cwd}`);
   log("info", `confirm gate: ${confirmGateEnabled ? `wired (socket=${SOCKET_PATH})` : "OFF (disabled in config)"}`);
   log("info", `safety: ${safetyLabel()}`);
