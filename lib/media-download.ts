@@ -71,7 +71,10 @@ export function inferExtension(fileName?: string, mimeType?: string): string {
 
 export async function downloadTelegramFile(opts: DownloadOptions): Promise<{ path: string; size: number }> {
   const maxBytes = opts.maxBytes ?? DEFAULT_MAX_BYTES;
-  const fetchImpl: FetchLike = opts.fetchImpl ?? ((input: string) => fetch(input));
+  // Default fetch carries a hard timeout so a hung getFile/CDN connection
+  // can't block the whole message handler indefinitely (a dead TCP socket
+  // with no RST would otherwise never settle).
+  const fetchImpl: FetchLike = opts.fetchImpl ?? ((input: string) => fetch(input, { signal: AbortSignal.timeout(60_000) }));
 
   const getFile = opts.getFile ?? (async (fileId: string): Promise<TgFileResult> => {
     const res = await fetchImpl(`${TG_API}/bot${opts.token}/getFile?file_id=${encodeURIComponent(fileId)}`);

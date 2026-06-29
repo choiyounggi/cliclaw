@@ -9,6 +9,7 @@ import {
   installSafetyDeny,
   uninstallSafetyDeny,
   SAFETY_DENY_PATTERNS,
+  CORE_DENY_PATTERNS,
   validateHookConfig,
 } from "../lib/hook-installer.ts";
 import { readdirSync } from "node:fs";
@@ -207,5 +208,39 @@ describe("readJsonSafe via mergeBashConfirmHook", () => {
     const siblings = readdirSync(dir);
     const backup = siblings.find((n: string) => n.startsWith("settings.json.corrupt-"));
     expect(backup).toBeTruthy();
+  });
+
+  it("backs up a valid-JSON-but-wrong-shape file before overwriting (no silent data loss)", () => {
+    const dir = mkdtempSync(join(process.cwd(), ".claude/tmp/invalid-backup-"));
+    const f = join(dir, "settings.json");
+    // Valid JSON, but `hooks` as an array fails validateHookConfig — the path
+    // that previously returned {} with NO backup and destroyed user settings.
+    writeFileSync(f, JSON.stringify({ hooks: [], myOtherSetting: 42 }));
+    const merged = JSON.parse(mergeBashConfirmHook(f, "/abs/hook"));
+    expect(merged.hooks.PreToolUse[0].matcher).toBe("Bash");
+    const backup = readdirSync(dir).find((n: string) => n.startsWith("settings.json.invalid-"));
+    expect(backup).toBeTruthy();
+  });
+});
+
+describe("CORE_DENY_PATTERNS — always-on gate integrity (#1)", () => {
+  it("mergeBashConfirmHook injects every core deny rule", () => {
+    const merged = JSON.parse(mergeBashConfirmHook(tmpFile("core-deny.json"), "/abs/hook"));
+    for (const p of CORE_DENY_PATTERNS) {
+      expect(merged.permissions.deny).toContain(p);
+    }
+    // covers gate config + persistence sinks
+    expect(merged.permissions.deny).toContain("Write(./.claude/**)");
+    expect(merged.permissions.deny).toContain("Write(~/Library/LaunchAgents/**)");
+  });
+
+  it("preserves user deny rules and is idempotent", () => {
+    const f = tmpFile("core-deny-user.json");
+    writeFileSync(f, JSON.stringify({ permissions: { deny: ["Bash(rm -rf /sacred/**)"] } }));
+    const once = JSON.parse(mergeBashConfirmHook(f, "/abs/hook"));
+    expect(once.permissions.deny).toContain("Bash(rm -rf /sacred/**)");
+    writeFileSync(f, JSON.stringify(once));
+    const twice = JSON.parse(mergeBashConfirmHook(f, "/abs/hook"));
+    expect(twice.permissions.deny.length).toBe(once.permissions.deny.length);
   });
 });

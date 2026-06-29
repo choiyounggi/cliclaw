@@ -49,6 +49,8 @@ export interface ConfirmServerOptions {
 export class ConfirmServer {
   private server: Server | null = null;
   private pending = new Map<string, PendingRequest>();
+  /** All live connections, so stop() can force-close ones not in `pending`. */
+  private sockets = new Set<Socket>();
 
   constructor(private readonly opts: ConfirmServerOptions) {}
 
@@ -76,7 +78,16 @@ export class ConfirmServer {
     for (const id of [...this.pending.keys()]) {
       this.respond(id, "deny", "봇 종료 중");
     }
-    await new Promise<void>((resolve) => this.server!.close(() => resolve()));
+    // Force-close any still-open sockets — a hook that connected but never sent
+    // a newline isn't in `pending`, so the deny loop won't close it, and
+    // server.close() would then never fire its callback (shutdown hangs).
+    for (const s of this.sockets) { try { s.destroy(); } catch { /* already gone */ } }
+    this.sockets.clear();
+    await new Promise<void>((resolve) => {
+      const t = setTimeout(resolve, 2000); // never block shutdown indefinitely
+      t.unref?.();
+      this.server!.close(() => { clearTimeout(t); resolve(); });
+    });
     this.server = null;
     try { unlinkSync(this.opts.socketPath); } catch { /* already gone */ }
   }
@@ -101,6 +112,7 @@ export class ConfirmServer {
   }
 
   private handleConnection(socket: Socket): void {
+    this.sockets.add(socket);
     let buf = "";
     let handled = false;
 
@@ -148,6 +160,7 @@ export class ConfirmServer {
       cleanup();
     });
     socket.on("close", () => {
+      this.sockets.delete(socket);
       // If the hook hung up before we replied, find and forget the pending entry.
       for (const [id, p] of this.pending) {
         if (p.socket === socket) {

@@ -56,11 +56,17 @@ export const DEFAULT_DANGER_PATTERNS: readonly DangerPattern[] = [
   // ── Filesystem destruction ──
   {
     id: "rm-rf",
-    re: /(^|[\s;|&])rm\s+(-[a-zA-Z]*[rR][a-zA-Z]*[fF]|-[a-zA-Z]*[fF][a-zA-Z]*[rR]|--recursive\s+--force|--force\s+--recursive)\b/,
+    // Match `rm` (at a command boundary, incl. `$(` and backtick) followed —
+    // anywhere in its argument span up to the next separator — by BOTH a
+    // recursive flag and a force flag, independently. This catches the
+    // separated/mixed forms (`rm -r -f`, `rm --recursive -f`, `rm -r --force`)
+    // and substitution-wrapped forms ($(rm -rf), `rm -rf`) that the prior
+    // single-token alternation let through the gate.
+    re: /(^|[\s;|&`(])rm\s+(?=[^;|&]*(?:-[a-zA-Z]*r|--recursive))(?=[^;|&]*(?:-[a-zA-Z]*f|--force))/i,
     reason: "rm -rf 계열 — 재귀 강제 삭제",
     decision: "prompt",
     justification: "재귀 강제 삭제는 되돌릴 수 없습니다. 대상 경로를 한 번 더 확인하세요.",
-    match: ["rm -rf /tmp/x", "rm -fr ~/junk", "rm -Rf /var/log", "rm --recursive --force /opt", "echo done; rm -rf build"],
+    match: ["rm -rf /tmp/x", "rm -fr ~/junk", "rm -Rf /var/log", "rm --recursive --force /opt", "echo done; rm -rf build", "rm -r -f /x", "rm -f -r /x", "rm --recursive -f /x", "rm -r --force /x", "$(rm -rf /)", "`rm -rf /`"],
     notMatch: ["rm file.txt", "rm -f file.txt", "rm -r dir"],
   },
   {
@@ -122,13 +128,20 @@ export const DEFAULT_DANGER_PATTERNS: readonly DangerPattern[] = [
   },
   {
     id: "sql-delete-all",
-    re: /\bDELETE\s+FROM\s+\w+(\s*;?\s*$|\s+(LIMIT|RETURNING|;))/i,
+    // Table identifier may be schema-qualified (public.users) or quoted
+    // ("users" / `users`) — the prior bare \w+ stopped at . and ", letting
+    // whole-table deletes on prod-shaped identifiers slip past the gate.
+    re: /\bDELETE\s+FROM\s+(?:\w+\.)?["`]?\w+["`]?(\s*;?\s*$|\s+(LIMIT|RETURNING|;))/i,
     reason: "DELETE FROM (WHERE 절 누락 가능)",
+    match: ["DELETE FROM users", "DELETE FROM public.users", "DELETE FROM \"users\"", "delete from logs;"],
+    notMatch: ["DELETE FROM users WHERE id=1", "SELECT * FROM users"],
   },
   {
     id: "sql-update-all",
-    re: /\bUPDATE\s+\w+\s+SET\s+[^;]+(?<!WHERE\b[^;]*)(;|$)/i,
+    re: /\bUPDATE\s+(?:\w+\.)?["`]?\w+["`]?\s+SET\s+[^;]+(?<!WHERE\b[^;]*)(;|$)/i,
     reason: "UPDATE ... SET (WHERE 절 누락 가능)",
+    match: ["UPDATE users SET active=false", "UPDATE public.users SET x=1"],
+    notMatch: ["UPDATE users SET active=false WHERE id=1"],
   },
 
   // ── Cloud destructive ──

@@ -1,6 +1,7 @@
 /// <reference types="node" />
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+import { writeFileAtomic } from "./atomic-write.ts";
 
 /** Generate a Claude/Codex-compatible hooks.json fragment for the bash-confirm hook. */
 export function buildBashConfirmHookEntry(hookCommand: string): {
@@ -60,6 +61,39 @@ export const SAFETY_DENY_PATTERNS: readonly string[] = [
  *  patterns we put there without disturbing anything the user added. */
 const SAFETY_MARKER_KEY = "__cliclaw_safety_managed__";
 
+/**
+ * ALWAYS-ON deny rules (installed with the bash-confirm hook, independent of
+ * the safety-mode toggle). The confirm gate only intercepts the `Bash` tool,
+ * and the agent runs with bypassPermissions — so without these, an agent
+ * could (a) rewrite the settings that hold the gate hook and disable it, or
+ * (b) gain execution/persistence via Write/Edit to launchd plists, git hooks,
+ * or shell rc files, all without ever triggering the Bash gate. These deny
+ * rules close that hole for Write/Edit/MultiEdit. They are NOT safety-marked,
+ * so toggling safety mode off does not remove them.
+ */
+export const CORE_DENY_PATTERNS: readonly string[] = [
+  // Gate integrity — the agent must not rewrite the settings holding the hook.
+  "Write(./.claude/**)", "Edit(./.claude/**)", "MultiEdit(./.claude/**)",
+  "Write(~/.claude/**)", "Edit(~/.claude/**)", "MultiEdit(~/.claude/**)",
+  // Persistence / code-execution sinks that bypass the Bash-only gate.
+  "Write(~/Library/LaunchAgents/**)", "Edit(~/Library/LaunchAgents/**)",
+  "Write(./.git/hooks/**)", "Edit(./.git/hooks/**)",
+  "Write(~/.zshrc)", "Edit(~/.zshrc)",
+  "Write(~/.zprofile)", "Edit(~/.zprofile)",
+  "Write(~/.bashrc)", "Edit(~/.bashrc)",
+  "Write(~/.bash_profile)", "Edit(~/.bash_profile)",
+  "Write(~/.profile)", "Edit(~/.profile)",
+];
+
+/** Union CORE_DENY_PATTERNS into cfg.permissions.deny (idempotent). */
+function applyCoreDeny(cfg: HookConfig): void {
+  const perms = { ...(cfg.permissions ?? {}) };
+  const deny = new Set<string>(Array.isArray(perms.deny) ? perms.deny : []);
+  for (const p of CORE_DENY_PATTERNS) deny.add(p);
+  perms.deny = Array.from(deny);
+  cfg.permissions = perms;
+}
+
 /** Render the merged config that ADDS our safety deny patterns. Idempotent. */
 export function mergeSafetyDeny(existingPath: string): string {
   const existing = readJsonSafe(existingPath);
@@ -99,13 +133,13 @@ export function mergeSafetyDenyRemoval(existingPath: string): string {
 export function installSafetyDeny(targetPath: string): void {
   const merged = mergeSafetyDeny(targetPath);
   mkdirSync(dirname(targetPath), { recursive: true });
-  writeFileSync(targetPath, merged);
+  writeFileAtomic(targetPath, merged);
 }
 
 export function uninstallSafetyDeny(targetPath: string): void {
   if (!existsSync(targetPath)) return;
   const merged = mergeSafetyDenyRemoval(targetPath);
-  writeFileSync(targetPath, merged);
+  writeFileAtomic(targetPath, merged);
 }
 
 /**
@@ -132,7 +166,15 @@ function readJsonSafe(path: string): HookConfig {
     catch { /* best effort */ }
     return {};
   }
-  if (!validateHookConfig(parsed)) return {};
+  if (!validateHookConfig(parsed)) {
+    // Valid JSON but an unexpected shape (e.g. a non-Claude/Codex config or a
+    // malformed hooks block). The caller is about to overwrite this file, so
+    // preserve it first — the prior code returned {} with NO backup, silently
+    // destroying the user's other settings.
+    try { writeFileSync(`${path}.invalid-${Date.now()}`, raw); }
+    catch { /* best effort */ }
+    return {};
+  }
   return parsed as HookConfig;
 }
 
@@ -185,6 +227,9 @@ export function mergeBashConfirmHook(existingPath: string, hookCommand: string):
   // gets backed up rather than silently obliterated.
   const existing = readJsonSafe(existingPath);
   const cfg: HookConfig = { ...existing };
+  // Always-on integrity guard — deny Write/Edit/MultiEdit to the gate's own
+  // config and persistence sinks (applied on every install). (#1)
+  applyCoreDeny(cfg);
   cfg.hooks = { ...(cfg.hooks ?? {}) };
   const pre = [...(cfg.hooks.PreToolUse ?? [])];
 
@@ -216,5 +261,5 @@ export function mergeBashConfirmHook(existingPath: string, hookCommand: string):
 export function installBashConfirmHook(targetPath: string, hookCommand: string): void {
   const merged = mergeBashConfirmHook(targetPath, hookCommand);
   mkdirSync(dirname(targetPath), { recursive: true });
-  writeFileSync(targetPath, merged);
+  writeFileAtomic(targetPath, merged);
 }

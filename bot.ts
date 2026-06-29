@@ -37,6 +37,7 @@ import { resolveCliPath } from "./lib/resolve-cli-path.ts";
 import { rotateIfLarge, truncateIfLarge } from "./lib/log-rotate.ts";
 import { createRateLimiter } from "./lib/rate-limiter.ts";
 import { DEFAULT_DANGER_PATTERNS, type DangerPattern } from "./lib/danger-patterns.ts";
+import { writeFileAtomic } from "./lib/atomic-write.ts";
 
 // ---------- types ----------
 type Agent = "claude" | "codex" | "pi" | "gemini";
@@ -287,7 +288,7 @@ function loadSafety(): boolean {
 }
 
 function saveSafety(enabled: boolean): void {
-  try { writeFileSync(SAFETY_FILE, JSON.stringify({ enabled }, null, 2)); }
+  try { writeFileAtomic(SAFETY_FILE, JSON.stringify({ enabled }, null, 2)); }
   catch (err) { log("error", `persist safety state failed: ${err}`); }
 }
 
@@ -313,7 +314,7 @@ function agentModeLabel(agent: Agent): string {
 }
 
 // Persist user-supplied extra patterns to a file the hook can read.
-writeFileSync(EXTRA_PATTERNS_FILE, JSON.stringify(extraDangerPatterns));
+writeFileAtomic(EXTRA_PATTERNS_FILE, JSON.stringify(extraDangerPatterns));
 
 // ---------- logging ----------
 // Redact secrets before any log write. Telegram bot tokens and npm
@@ -380,7 +381,7 @@ function loadStore(): SessionStore {
   catch { return {}; }
 }
 function saveStore(s: SessionStore): void {
-  writeFileSync(SESSIONS_FILE, JSON.stringify(s, null, 2));
+  writeFileAtomic(SESSIONS_FILE, JSON.stringify(s, null, 2));
 }
 function getChat(store: SessionStore, chatId: number): ChatState {
   const key = String(chatId);
@@ -413,15 +414,40 @@ function agentSessionDir(agent: Agent, chatId: number): string {
 // ---------- telegram api ----------
 const API = `https://api.telegram.org/bot${config.token}`;
 
-async function tg<T = unknown>(method: string, params: Record<string, unknown> = {}): Promise<T> {
-  const res = await fetch(`${API}/${method}`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(params),
-  });
-  const data = await res.json() as { ok: boolean; result?: T; description?: string };
-  if (!data.ok) throw new Error(`tg ${method}: ${data.description}`);
-  return data.result as T;
+async function tg<T = unknown>(
+  method: string,
+  params: Record<string, unknown> = {},
+  timeoutMs = 30_000,
+): Promise<T> {
+  // Up to 2 attempts so a single 429 (rate limit) can be honored with the
+  // server-specified backoff instead of hammering straight back into the limit.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    // AbortSignal.timeout guarantees the await settles — a dead TCP connection
+    // (no RST) would otherwise leave fetch hanging forever and silently wedge
+    // the long-poll loop with no error and no recovery.
+    const res = await fetch(`${API}/${method}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(params),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    let data: { ok: boolean; result?: T; description?: string; parameters?: { retry_after?: number } };
+    try {
+      data = await res.json() as typeof data;
+    } catch {
+      // Non-JSON body (e.g. 502 HTML from a proxy) — don't throw an opaque
+      // "Unexpected token" from res.json(); surface the status instead.
+      throw new Error(`tg ${method}: HTTP ${res.status} (non-JSON response)`);
+    }
+    if (data.ok) return data.result as T;
+    const retryAfter = data.parameters?.retry_after;
+    if (res.status === 429 && retryAfter && attempt === 0) {
+      await Bun.sleep((retryAfter + 1) * 1000);
+      continue;
+    }
+    throw new Error(`tg ${method}: ${data.description ?? `HTTP ${res.status}`}`);
+  }
+  throw new Error(`tg ${method}: retries exhausted`);
 }
 
 const MAX_LEN = 4096;
@@ -444,17 +470,31 @@ async function sendMessage(chatId: number, text: string): Promise<void> {
 async function sendChunkedHtml(chatId: number, html: string, plainFallback: string): Promise<void> {
   for (let i = 0; i < html.length; i += MAX_LEN) {
     const chunk = html.slice(i, i + MAX_LEN);
-    const plainChunk = plainFallback.slice(i, i + MAX_LEN);
     try {
       await tg("sendMessage", { chat_id: chatId, text: chunk, parse_mode: "HTML" });
     } catch (err) {
       // The model can produce HTML the parser doesn't accept (mismatched tags,
-      // odd entities). Always retry the same chunk as plain text so the user
-      // still sees the answer — log once for observability.
-      log("error", `sendMessage HTML failed, retrying plain: ${err}`);
+      // odd entities). HTML and the plain fallback have DIFFERENT lengths, so
+      // the HTML offset `i` cannot index plainFallback — doing so sent the wrong
+      // slice (or an empty string → "message text is empty" → silent drop of the
+      // rest). Fall back by re-chunking the FULL plain text independently, then
+      // stop. (A multi-chunk partial failure may re-send an already-sent prefix
+      // as plain — acceptable vs. losing the answer.)
+      log("error", `sendMessage HTML failed, falling back to plain: ${err}`);
       audit.write({ chatId, type: "error", data: { op: "sendMessage", err: String(err) } });
-      try { await tg("sendMessage", { chat_id: chatId, text: plainChunk }); }
-      catch (err2) { log("error", `sendMessage plain also failed: ${err2}`); break; }
+      await sendChunkedPlain(chatId, plainFallback);
+      return;
+    }
+  }
+}
+
+async function sendChunkedPlain(chatId: number, text: string): Promise<void> {
+  for (let j = 0; j < text.length; j += MAX_LEN) {
+    try {
+      await tg("sendMessage", { chat_id: chatId, text: text.slice(j, j + MAX_LEN) });
+    } catch (err) {
+      log("error", `sendMessage plain failed: ${err}`);
+      return;
     }
   }
 }
@@ -1598,7 +1638,7 @@ async function pollLoop(): Promise<void> {
         offset,
         timeout: config.pollTimeoutSec,
         allowed_updates: ["message", "callback_query"],
-      });
+      }, (config.pollTimeoutSec + 10) * 1000);  // client timeout > server long-poll
       for (const u of updates) {
         offset = u.update_id + 1;
         if (u.callback_query) {

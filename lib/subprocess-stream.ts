@@ -69,15 +69,22 @@ export async function runSubprocessStream(
 
   const wrappedStdout = opts.onStdoutLine ? (line: string) => { resetIdle(); opts.onStdoutLine!(line); } : (opts.idleTimeoutMs ? () => resetIdle() : undefined);
 
-  const [stdout, stderr] = await Promise.all([
-    drainStream(proc.stdout, wrappedStdout),
-    drainStream(proc.stderr, opts.onStderrLine),
-  ]);
-
-  await proc.exited;
-  clearTimeout(timeoutHandle);
-  if (idleHandle) clearTimeout(idleHandle);
-  if (opts.signal) opts.signal.removeEventListener("abort", abortListener);
+  let stdout = "";
+  let stderr = "";
+  try {
+    [stdout, stderr] = await Promise.all([
+      drainStream(proc.stdout, wrappedStdout),
+      drainStream(proc.stderr, opts.onStderrLine),
+    ]);
+    await proc.exited;
+  } finally {
+    // Always release timers + the abort listener. Without this, a drain/exit
+    // rejection would leak them — keeping a dead process's SIGKILL timer armed
+    // and accumulating abort listeners across reused AbortSignals.
+    clearTimeout(timeoutHandle);
+    if (idleHandle) clearTimeout(idleHandle);
+    if (opts.signal) opts.signal.removeEventListener("abort", abortListener);
+  }
 
   return {
     exitCode: proc.exitCode ?? -1,
@@ -98,9 +105,11 @@ async function drainStream(
   let full = "";
   try {
     while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      const chunk = decoder.decode(value, { stream: true });
+      // Catch read rejection (broken pipe on a crashed/killed child) and stop
+      // draining gracefully — propagating would skip the caller's cleanup.
+      const result = await reader.read().catch(() => null);
+      if (!result || result.done) break;
+      const chunk = decoder.decode(result.value, { stream: true });
       full += chunk;
       if (!onLine) continue;
       buf += chunk;
