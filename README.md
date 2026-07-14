@@ -9,45 +9,53 @@
   <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-MIT-green"></a>
 </p>
 
-> **English**: A Telegram bot that drives four local coding CLIs (Claude Code / Codex / Pi / Gemini) from your phone, with per-chat sessions, a confirm gate for dangerous commands, automatic launchd, and corporate TLS auto-detection. Korean is the primary UX language — pull-requests welcome for English copy.
+**English** | [한국어](README.ko.md)
 
-네 가지 로컬 코딩 CLI(**Claude Code · Codex · Pi · Gemini**)를 텔레그램에서 바꿔가며 쓸 수 있게 해주는 단일 데몬.
+A single daemon that lets you drive four local coding CLIs (**Claude Code ·
+Codex · Pi · Gemini**) from Telegram, switching between them per chat.
 
-채팅마다 에이전트별 세션을 독립적으로 유지하고, 위험 명령에 대한 confirm 게이트, 응답 스트리밍, 이미지 첨부 처리, 회사망(Zscaler 등) TLS 인터셉터 자동 감지까지 지원합니다.
+It keeps an independent per-agent session for every chat, and ships a confirm
+gate for dangerous commands, response streaming, image-attachment handling, and
+auto-detection of corporate TLS interceptors (Zscaler, etc.).
 
-> 설치된 CLI 중 **원하는 만큼만** 깔아도 됩니다. 빠진 에이전트는 자동으로 활성 목록에서 제외됩니다.
+> Install **only the CLIs you want** — missing agents are automatically dropped
+> from the active list.
 
-## 빠른 시작 (3분)
+> The chat UX (user messages, errors, `/help`) is currently Korean-first; the
+> bot itself works fine either way.
 
-### 1. 사전 요구사항
+## Quick start (3 minutes)
+
+### 1. Prerequisites
 
 - macOS (Apple Silicon / Intel)
 - [Bun](https://bun.sh) 1.x — `curl -fsSL https://bun.sh/install | bash`
-- 사용할 코딩 CLI 중 **최소 하나** 설치 + 로그인된 상태 (봇은 인증된 자식 프로세스를 spawn할 뿐)
+- **At least one** of the coding CLIs installed and logged in (the bot merely spawns authenticated child processes)
   - Claude Code: `npm install -g @anthropic-ai/claude-code`
   - Codex: `npm install -g @openai/codex`
   - Pi: `npm install -g @earendil-works/pi-coding-agent`
   - Gemini: `npm install -g @google/gemini-cli`
 
-### 2. 설치
+### 2. Install
 
 ```bash
-# Bun (권장)
+# Bun (recommended)
 bun add -g @younggichoi/cliclaw
 
-# 또는 npm
+# or npm
 npm install -g @younggichoi/cliclaw
 ```
 
-> 패키지는 scoped name(`@younggichoi/cliclaw`)으로 publish되지만, 설치 후 명령어는 그대로 **`cliclaw`** 입니다.
+> The package publishes under a scoped name (`@younggichoi/cliclaw`), but the
+> installed command is simply **`cliclaw`**.
 
-### 3. 인터랙티브 셋업
+### 3. Interactive setup
 
 ```bash
 cliclaw init
 ```
 
-5단계로 자동 진행됩니다:
+Five steps, guided:
 
 ```
 Welcome to cliclaw setup.
@@ -70,9 +78,9 @@ Step 3/5 — Authorize your Telegram account
   ✓ Received from user_id=123456789
   Authorize this Telegram user? [Y/n] y
 
-Step 4/5 — Corporate TLS interceptor (선택)
+Step 4/5 — Corporate TLS interceptor (optional)
   $NODE_EXTRA_CA_CERTS: /path/to/Zscaler.pem
-  이 CA 인증서를 봇의 LaunchAgent 환경에 적용할까요? [Y/n] y
+  Apply this CA certificate to the bot's LaunchAgent environment? [Y/n] y
 
 Step 5/5 — Auto-start at login (launchd)
   Install LaunchAgent so the bot starts automatically on login? [Y/n] y
@@ -84,141 +92,150 @@ All set.
   Test:  send /status in Telegram.
 ```
 
-이게 끝입니다. 맥북 화면이 꺼지거나 재부팅해도 자동으로 다시 실행됩니다.
+That's it. The bot restarts automatically after screen lock or a reboot.
 
-## CLI 명령
+## CLI commands
 
-| 명령 | 동작 |
+| Command | What it does |
 |---|---|
-| `cliclaw init` | 인터랙티브 셋업 (토큰, 에이전트 탐지, telegram id 캡처, CA, launchd) |
-| `cliclaw start` | 봇을 포그라운드로 실행 (테스트용) |
-| `cliclaw install-launchd` | LaunchAgent 설치 (config.json 의 `launchd.extraEnv` 자동 반영) |
-| `cliclaw uninstall-launchd` | LaunchAgent 제거 |
-| `cliclaw doctor` | 경로·에이전트·플리스트 상태 점검 |
-| `cliclaw help` | 도움말 |
+| `cliclaw init` | Interactive setup (token, agent detection, telegram-id capture, CA, launchd) |
+| `cliclaw start` | Run the bot in the foreground (for testing) |
+| `cliclaw install-launchd` | Install the LaunchAgent (auto-applies `launchd.extraEnv` from config.json) |
+| `cliclaw uninstall-launchd` | Remove the LaunchAgent |
+| `cliclaw doctor` | Check paths, agents, and plist status |
+| `cliclaw help` | Help |
 
-## 채팅 명령 (텔레그램에서)
+## Chat commands (in Telegram)
 
-| 명령 | 동작 |
+| Command | What it does |
 |---|---|
-| `/claude` `/codex` `/pi` `/gemini` | 이 채팅의 active 에이전트 전환 (설치 안 된 에이전트는 자동 숨김) |
-| `/status` | 에이전트별 세션 상태 + 진행 중 작업 표시 |
-| `/health` | 봇 시스템 상태 (가동시간, 메모리, 로그 크기, 채팅·작업 수) |
-| `/stop` | 현재 채팅의 진행 중 작업 취소 (SIGTERM → 5s 후 SIGKILL) |
-| `/reset` | 현재 active 에이전트 세션만 폐기 |
-| `/reset all` | 이 채팅의 모든 에이전트 세션 폐기 |
-| `/safety` | 안전모드 상태 확인 — `/safety on` 또는 `/safety off` 로 토글 |
-| `/start` `/help` | 도움말 |
-| 그 외 텍스트 / 사진 | active 에이전트에 프롬프트 전달 (사진은 자동 다운로드 후 경로가 프롬프트 앞에 주입됨) |
+| `/claude` `/codex` `/pi` `/gemini` | Switch this chat's active agent (uninstalled agents are hidden) |
+| `/status` | Per-agent session status + any job in progress |
+| `/health` | Bot system status (uptime, memory, log sizes, chat/job counts) |
+| `/stop` | Cancel this chat's running job (SIGTERM → SIGKILL after 5s) |
+| `/reset` | Discard only the current active agent's session |
+| `/reset all` | Discard every agent session in this chat |
+| `/safety` | Show safety-mode status — toggle with `/safety on` / `/safety off` |
+| `/start` `/help` | Help |
+| Any other text / photo | Sent as a prompt to the active agent (photos are downloaded and their path is prepended to the prompt) |
 
-에이전트 전환 시 기존 세션은 그대로 유지 — 돌아오면 이어집니다. 진행 중 작업이 있는 채팅에 새 프롬프트를 보내면 거부됩니다 (`/stop` 또는 종료 대기).
+Switching agents keeps the old session intact — come back and continue. Sending
+a new prompt to a chat with a running job is rejected (use `/stop` or wait).
 
-## 디렉토리 구조
+## Directory layout
 
-설치 후 상태(state)는 `~/.cliclaw/` 에 격리됩니다:
+All state is isolated under `~/.cliclaw/`:
 
 ```
 ~/.cliclaw/
-├── config.json              # 600 권한, 토큰·화이트리스트·launchd extraEnv
-├── safety.json              # /safety on|off 영속 상태
-├── sessions.json            # 채팅별 active agent 메타
-├── sessions/                # 채팅별 codex / pi / gemini 디렉토리
-├── workspace/               # 에이전트 공통 cwd (샌드박스)
-│   ├── .claude/settings.json # 위험 명령 hook + 안전모드 ON 시 deny 룰
-│   └── uploads/<chatId>/    # 텔레그램 사진 다운로드
+├── config.json              # mode 600; token, allowlist, launchd extraEnv
+├── safety.json              # persisted /safety on|off state
+├── sessions.json            # per-chat active-agent metadata
+├── sessions/                # per-chat codex / pi / gemini directories
+├── workspace/               # the agents' shared cwd (sandbox)
+│   ├── .claude/settings.json # dangerous-command hook + deny rules when safety is ON
+│   └── uploads/<chatId>/    # Telegram photo downloads
 ├── logs/
-│   ├── bot.log              # 토큰 자동 마스킹 적용
+│   ├── bot.log              # token auto-masking applied
 │   ├── bot.err              # launchd stderr
-│   └── audit.jsonl          # 감사 로그 (decision, safety 상태 포함)
-└── .sock/                   # confirm gate IPC
+│   └── audit.jsonl          # audit log (decisions, safety state)
+└── .sock/                   # confirm-gate IPC
 ```
 
-state 디렉토리는 `CLICLAW_HOME` 환경변수로 변경 가능합니다:
+The state directory can be moved with the `CLICLAW_HOME` env var:
 
 ```bash
 CLICLAW_HOME=~/my-bot cliclaw init
 ```
 
-## 주요 기능
+## Features
 
-### 1. 에이전트 경로 자동 탐색
-`config.json`에 절대경로를 박을 필요 없습니다. 시작할 때 세 단계로 자동 발견:
+### 1. Automatic agent path discovery
+No absolute paths in `config.json`. At startup, agents are discovered in three passes:
 1. `~/.local/bin`, `~/.claude/local`, `/usr/local/bin`, `/opt/homebrew/bin`
-2. `$NVM_DIR` 또는 `~/.nvm` 의 가장 최신 node 버전 `bin/<cmd>`
-3. 로그인 쉘에서 `command -v <cmd>` (`.zshrc` 로드한 PATH 사용)
+2. `bin/<cmd>` of the newest node under `$NVM_DIR` or `~/.nvm`
+3. `command -v <cmd>` in a login shell (PATH with `.zshrc` loaded)
 
-탐지 안 된 에이전트는 활성 목록에서 자동 제외됩니다 (graceful skip). 4 종 중 일부만 깔아도 봇이 정상 가동.
+Undetected agents are gracefully skipped. The bot runs fine with any subset of the four.
 
-### 2. 안전모드 (`/safety on` · `/safety off`)
-**ON (기본)**:
-- 위험 Bash 명령(`rm -rf`, `git push --force`, DROP, `kubectl delete`, AWS `delete-*`, `sudo`, `curl|sh`, ssh prd-* 등)이 텔레그램 inline keyboard `[✅ 허용] [❌ 거부]` 로 다시 확인 — 무응답 시 자동 거부.
-- Claude 의 Read 도구가 민감 파일 거부: `~/.ssh/**`, `~/.aws/**`, `~/.gnupg/**`, `~/.netrc`, `~/.npmrc`, `**/.env*`, `**/*.pem`, `**/id_rsa*`, `**/id_ed25519*`, `./secrets/**`.
-- `confirmGate.extraPatterns` 로 사용자 정의 regex 추가 가능.
+### 2. Safety mode (`/safety on` · `/safety off`)
+**ON (default)**:
+- Dangerous Bash commands (`rm -rf`, `git push --force`, DROP, `kubectl delete`, AWS `delete-*`, `sudo`, `curl|sh`, ssh prd-*, …) are re-confirmed via a Telegram inline keyboard `[✅ Allow] [❌ Deny]` — no response means auto-deny.
+- Claude's Read tool denies sensitive files: `~/.ssh/**`, `~/.aws/**`, `~/.gnupg/**`, `~/.netrc`, `~/.npmrc`, `**/.env*`, `**/*.pem`, `**/id_rsa*`, `**/id_ed25519*`, `./secrets/**`.
+- Add your own regexes via `confirmGate.extraPatterns`.
 
-**OFF**: 이미 본인 환경에 외부 가드(`pre-bash-guard`, EDR 등)가 있어 봇의 confirm 프롬프트가 중복으로 느껴지면 텔레그램에서 한 줄로 OFF. deny 룰도 같이 비활성화. 모든 IPC 요청은 여전히 `logs/audit.jsonl` 에 `decision: allow, reason: safety_off` 로 기록됩니다.
+**OFF**: if your environment already has an external guard (`pre-bash-guard`,
+EDR, …) and the bot's confirm prompts feel redundant, turn it off with one line
+in Telegram. Deny rules are disabled together. Every IPC request is still
+recorded in `logs/audit.jsonl` as `decision: allow, reason: safety_off`.
 
-상태는 `$CLICLAW_HOME/safety.json` 에 영속화되어 재시작 후에도 유지.
+The state persists in `$CLICLAW_HOME/safety.json` across restarts.
 
-### 3. 응답 스트리밍 (Claude)
-`--include-partial-messages` 의 `text_delta` 를 받아 `editMessageText` 로 실시간 갱신. 1.5초 디바운스. 3800자 넘으면 새 메시지로 롤오버.
+### 3. Response streaming (Claude)
+Consumes `text_delta` from `--include-partial-messages` and live-updates via
+`editMessageText`, debounced at 1.5s. Past 3800 chars it rolls over to a new message.
 
-### 4. 이미지 첨부 처리
-텔레그램의 사진/이미지 문서를 자동으로 `workspace/uploads/<chatId>/<msgId>.<ext>` 로 다운로드 후 경로를 프롬프트 앞에 추가.
+### 4. Image attachments
+Telegram photos/image documents are downloaded to
+`workspace/uploads/<chatId>/<msgId>.<ext>` and the path is prepended to the prompt.
 
-### 5. headless 권한 정책
-- **Claude**: `--permission-mode bypassPermissions` 로 실행 — Bash 위험 명령은 confirm 게이트가 잡고, 민감 파일은 안전모드의 deny 룰이 거부.
-- **Codex**: `sandbox=workspace-write` 기본. `danger-full-access` 사용 금지.
-- **Pi**: 기본 모드.
-- **Gemini**: `approvalMode=auto_edit` 기본 (edit 자동, 파괴적 명령은 prompt). 더 자율적 `yolo`, 더 보수적 `default`/`plan` 가능.
+### 5. Headless permission policy
+- **Claude**: runs with `--permission-mode bypassPermissions` — dangerous Bash is caught by the confirm gate, and sensitive files by safety-mode deny rules.
+- **Codex**: `sandbox=workspace-write` by default. Never use `danger-full-access`.
+- **Pi**: default mode.
+- **Gemini**: `approvalMode=auto_edit` by default (edits auto-approved, destructive commands prompt). More autonomous `yolo` or more conservative `default`/`plan` available.
 
-### 6. 회사망 TLS 인터셉터 자동 감지
-Zscaler / Forticlient / Cisco Umbrella 등이 HTTPS 를 가로채는 환경이면 Node 가 Telegram 인증서를 신뢰 못 해 봇이 동작 못합니다.
-`cliclaw init` 의 Step 4 가 `$NODE_EXTRA_CA_CERTS` 또는 `launchctl getenv NODE_EXTRA_CA_CERTS` 를 자동 탐지해 사용자 확인 후 `config.json` 의 `launchd.extraEnv` 에 영속화. 이후 모든 `install-launchd` 호출이 plist 에 자동 박음.
+### 6. Corporate TLS interceptor auto-detection
+Where Zscaler / Forticlient / Cisco Umbrella intercepts HTTPS, Node cannot
+trust Telegram's certificate and the bot cannot run. Step 4 of `cliclaw init`
+auto-detects `$NODE_EXTRA_CA_CERTS` or `launchctl getenv NODE_EXTRA_CA_CERTS`,
+asks you, and persists it into `launchd.extraEnv` in `config.json`. Every later
+`install-launchd` bakes it into the plist automatically.
 
-### 7. 비밀 로그 마스킹
-`logs/bot.log` / `bot.err` 에 쓰이는 모든 메시지가 사전 redaction:
-- Telegram bot token (`\d{8,}:[A-Za-z0-9_-]{30,}`)
-- npm token (`npm_…`)
-- GitHub PAT (`gh[pousr]_…`)
-- live `config.token` 정확 일치
+### 7. Secret masking in logs
+Everything written to `logs/bot.log` / `bot.err` is pre-redacted:
+- Telegram bot tokens (`\d{8,}:[A-Za-z0-9_-]{30,}`)
+- npm tokens (`npm_…`)
+- GitHub PATs (`gh[pousr]_…`)
+- exact matches of the live `config.token`
 
-Time Machine 백업 / EDR / 어깨 너머 노출 모두 방어.
+Defends against Time Machine backups, EDR, and shoulder surfing alike.
 
-### 8. 한국어 UI
-모든 사용자 메시지·에러·`/help` 가 한국어.
+### 8. Korean UI
+All user-facing messages, errors, and `/help` are in Korean (English copy PRs welcome).
 
-## launchd 동작 상세
+## launchd details
 
-`cliclaw init` 의 5단계에서 "Yes" 를 누르면:
-1. `~/Library/LaunchAgents/com.<username>.cliclaw.plist` 생성 (corporate CA 박힘 포함)
-2. `launchctl bootstrap gui/$UID <plist>` 로 즉시 적재·시작
-3. 이후 로그인 / 부팅 / 크래시 시 자동 재시작
+Answering "Yes" at step 5 of `cliclaw init`:
+1. Creates `~/Library/LaunchAgents/com.<username>.cliclaw.plist` (corporate CA baked in)
+2. Loads and starts it immediately via `launchctl bootstrap gui/$UID <plist>`
+3. Auto-restarts on login / boot / crash from then on
 4. stdout → `~/.cliclaw/logs/bot.log`, stderr → `bot.err`
 
-수동 관리:
+Manual management:
 ```bash
-# 중지 (다시 로그인 시 자동 재시작됨)
+# stop (auto-restarts on next login)
 launchctl kill SIGTERM gui/$UID/com.<username>.cliclaw
 
-# 완전 비활성화 (자동 재시작도 막음)
+# fully disable (no auto-restart either)
 cliclaw uninstall-launchd
 
-# 다시 활성화 (config.json 의 launchd.extraEnv 자동 반영)
+# re-enable (auto-applies launchd.extraEnv from config.json)
 cliclaw install-launchd
 ```
 
-## 보안
+## Security
 
-- **봇 토큰 = 모든 설치된 에이전트에 대한 원격 셸**. 토큰 유출 시 BotFather `/revoke` 즉시.
-- `allowedUserIds` 비면 모든 메시지 거부 (fail-closed).
-- `config.json` 권한 `600` 유지 (init이 자동 설정).
-- `confirmGate.enabled: false` 또는 codex sandbox 를 `danger-full-access` 로 바꾸지 말 것.
-- gemini `approvalMode` 를 `yolo` 로 옵트인하면 모든 도구가 자동 승인됩니다 — 이해하고 사용.
-- 의심 상황에서는 `/safety on` 으로 deny 룰 즉시 활성화.
+- **The bot token = a remote shell into every installed agent.** If it leaks, `/revoke` at BotFather immediately.
+- An empty `allowedUserIds` rejects all messages (fail-closed).
+- Keep `config.json` at mode `600` (init sets it automatically).
+- Never set `confirmGate.enabled: false` or switch the codex sandbox to `danger-full-access`.
+- Opting Gemini's `approvalMode` into `yolo` auto-approves every tool — use it with full understanding.
+- When in doubt, `/safety on` re-activates the deny rules instantly.
 
-## 수동 셋업 (init 흐름 없이)
+## Manual setup (without init)
 
-`cliclaw init` 을 거치지 않고 직접 설치하려면:
+To install without the `cliclaw init` flow:
 
 ```bash
 git clone https://github.com/choiyounggi/cliclaw.git
@@ -227,62 +244,65 @@ bun install
 mkdir -p ~/.cliclaw
 cp config.example.json ~/.cliclaw/config.json
 chmod 600 ~/.cliclaw/config.json
-# config.json 의 token, allowedUserIds 채운 뒤
+# fill token and allowedUserIds in config.json, then
 bun run bot.ts
 ```
 
-## 테스트
+## Tests
 
 ```bash
 bun run test
 ```
 
-## 알려진 한계
+## Known limits
 
-- 위험 패턴은 정규식 기반 — 100% 분류 어려움. 사용자가 직접 정책 유지.
-- Codex / Pi / Gemini 본문 텍스트 스트리밍 미지원 (구조화 이벤트 부재 또는 미통합).
-- Gemini 의 위험 명령은 자체 `approvalMode` 에만 의존 (bash-confirm IPC 미통합).
-- 사용자 응답 시간 동안 hook이 IPC를 잡고 대기.
-- 음성/파일 첨부 X (사진만).
-- 동일 채팅 내 동시 메시지는 거부 (`/stop` 또는 종료 대기).
+- Dangerous patterns are regex-based — 100% classification is impossible; you own the policy.
+- No body-text streaming for Codex / Pi / Gemini (no structured events, or not integrated).
+- Gemini's dangerous commands rely solely on its own `approvalMode` (bash-confirm IPC not integrated).
+- The hook holds the IPC while waiting for the user's decision.
+- No voice/file attachments (photos only).
+- Concurrent messages in the same chat are rejected (`/stop` or wait).
 - macOS only.
 
-## 변경 이력
+## Changelog
 
-버전별 변경사항은 [GitHub Releases](https://github.com/choiyounggi/cliclaw/releases) 에 정리되어 있습니다.
+Per-version changes live on [GitHub Releases](https://github.com/choiyounggi/cliclaw/releases).
 
-## 릴리스 자동화 (maintainer)
+## Release automation (maintainer)
 
-새 버전 publish 흐름:
+Publishing a new version:
 
 ```bash
-# 1) 버전 bump (commit + tag 자동 생성)
-npm version patch          # 또는 minor / major
+# 1) bump the version (auto-creates commit + tag)
+npm version patch          # or minor / major
 
-# 2) commit + tag 푸시
+# 2) push commit + tag
 git push --follow-tags
 ```
 
-그 다음 GitHub Web UI 의 "Draft a new release" → tag 선택 → Publish release.
-`.github/workflows/publish.yml` 이 자동 실행되어 `npm publish --access public` 까지 끝냅니다. 워크플로는 release tag 이름과 `package.json` version 일치를 먼저 검증하므로, 두 값이 어긋나 있으면 publish하지 않고 fail합니다.
+Then in the GitHub web UI: "Draft a new release" → pick the tag → Publish
+release. `.github/workflows/publish.yml` runs automatically through
+`npm publish --access public`. The workflow first verifies the release tag
+matches the `package.json` version and fails without publishing on a mismatch.
 
-**사전 등록 필요** (한 번만): repo Settings → Secrets and variables → Actions → **NPM_TOKEN** 에 2FA bypass 가능한 npm 토큰 등록.
+**One-time prerequisite**: repo Settings → Secrets and variables → Actions →
+register **NPM_TOKEN** with an npm token capable of 2FA bypass.
 
 1. <https://www.npmjs.com/settings/younggichoi/tokens/new>
-2. Granular Access Token 또는 Classic **Automation** Token 발급 (2FA bypass 포함)
-3. 발급된 `npm_…` 토큰을 GitHub Actions secret `NPM_TOKEN` 으로 추가
+2. Issue a Granular Access Token or a Classic **Automation** token (with 2FA bypass)
+3. Add the `npm_…` token as the GitHub Actions secret `NPM_TOKEN`
 
-**보안 강화 옵션** (선택): npm Trusted Publishing(OIDC)으로 전환하면 토큰 자체가 불필요합니다.
-1. <https://www.npmjs.com/package/@younggichoi/cliclaw/access> 에서 Trusted Publisher → GitHub Actions 추가 (workflow filename: `publish.yml`)
-2. `.github/workflows/publish.yml` 에 `permissions: id-token: write` 추가 + `NODE_AUTH_TOKEN` 제거 + `--provenance` 플래그 추가
-3. 기존 NPM_TOKEN secret 삭제
+**Hardening option**: switch to npm Trusted Publishing (OIDC) and no token is needed at all.
+1. At <https://www.npmjs.com/package/@younggichoi/cliclaw/access>, add Trusted Publisher → GitHub Actions (workflow filename: `publish.yml`)
+2. In `.github/workflows/publish.yml`, add `permissions: id-token: write`, remove `NODE_AUTH_TOKEN`, add the `--provenance` flag
+3. Delete the old NPM_TOKEN secret
 
-## 기여 및 보안
+## Contributing & security
 
-- 코드 기여: [CONTRIBUTING.md](CONTRIBUTING.md)
-- 개발 흐름·디렉토리 구조: [DEVELOPMENT.md](DEVELOPMENT.md)
-- 보안 정책·위협 모델·취약점 보고: [SECURITY.md](SECURITY.md)
+- Code contributions: [CONTRIBUTING.md](CONTRIBUTING.md)
+- Dev flow & directory structure: [DEVELOPMENT.md](DEVELOPMENT.md)
+- Security policy, threat model, vulnerability reports: [SECURITY.md](SECURITY.md)
 
-## 라이선스
+## License
 
-MIT. `LICENSE` 참조.
+MIT. See `LICENSE`.
