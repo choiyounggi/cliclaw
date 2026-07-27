@@ -1,4 +1,5 @@
 # cliclaw
+<img width="617" height="448" alt="스크린샷 2026-07-27 오후 2 18 46" src="https://github.com/user-attachments/assets/d6204699-11a2-4c8b-a100-4a2527f91c75" />
 
 <p>
   <a href="https://github.com/choiyounggi/cliclaw/actions/workflows/test.yml"><img alt="Test" src="https://github.com/choiyounggi/cliclaw/actions/workflows/test.yml/badge.svg"></a>
