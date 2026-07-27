@@ -1,11 +1,11 @@
 {
   "name": "@younggichoi/cliclaw",
-  "version": "0.9.3",
+  "version": "0.9.4",
   "publishConfig": {
     "access": "public"
   },
   "type": "module",
-  "description": "Telegram bridge for local coding CLIs (Claude Code, Codex, Pi) with per-chat sessions, confirm gate, streaming, and image attachments.",
+  "description": "Telegram bridge for local coding agents (Claude Code, Codex, Gemini, Pi) — per-chat sessions, a confirm gate for dangerous commands, secret masking, streaming, and image attachments.",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -15,10 +15,17 @@
   "bugs": "https://github.com/choiyounggi/cliclaw/issues",
   "keywords": [
     "telegram",
+    "telegram-bot",
     "claude",
     "claude-code",
     "codex",
+    "gemini",
     "pi",
+    "ai-agent",
+    "coding-agent",
+    "cli",
+    "orchestrator",
+    "daemon",
     "bot",
     "agent",
     "ai"
