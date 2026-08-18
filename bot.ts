@@ -18,8 +18,11 @@
 import { readFileSync, writeFileSync, existsSync, appendFileSync, mkdirSync, symlinkSync, unlinkSync, lstatSync, readdirSync, statSync } from "fs";
 import { join, dirname, resolve as resolvePath } from "path";
 import { homedir } from "os";
+import { execFileSync } from "node:child_process";
 
 import { JobRegistry, type Job } from "./lib/job-registry.ts";
+import { acquireInstanceLock, releaseInstanceLock } from "./lib/instance-lock.ts";
+import { isNonPrivateChat, ConfigFatalError, isConfigFatalError } from "./lib/chat-policy.ts";
 import { createAuditWriter, type AuditWriter } from "./lib/audit-log.ts";
 import { runSubprocessStream } from "./lib/subprocess-stream.ts";
 import { parseClaudeStreamLine, parseGeminiStreamLine, detectProgressLine, stripAnsi } from "./lib/stream-parser.ts";
@@ -197,77 +200,134 @@ for (const k of HIJACK_ENV) {
 }
 
 // ---------- config ----------
-const config: Config = JSON.parse(readFileSync(CONFIG_FILE, "utf8"));
-if (!config.token || config.token.startsWith("PASTE_")) {
-  console.error("config.json: token not set");
-  process.exit(1);
-}
-// Resolve agent CLI paths. A blank or missing `path` triggers auto-discovery
-// (well-known locations, nvm scan, login-shell fallback) so the bot works on
-// any user's machine without hand-edited absolute paths. An explicit path that
-// exists is honored as-is — auto-discovery is opt-in by omission.
-//
-// Agents whose CLI cannot be located are DROPPED from AGENT_NAMES rather than
-// killing the bot — users routinely pick a subset (claude only, or claude +
-// codex without pi, etc.) and earlier versions refused to start in that case.
-{
-  // A config.json written by an older cliclaw (before a given agent
-  // existed) won't have that agent's entry at all. Auto-create a minimal
-  // placeholder so the resolver + later config.agents[a].path = ...
-  // assignment don't crash with "undefined is not an object". Defaults
-  // mirror config.example.json shape; the user is free to edit them.
-  const defaultAgentEntries: Record<Agent, () => Record<string, unknown>> = {
-    claude: () => ({ path: "", model: "sonnet", maxTurns: 100 }),
-    codex:  () => ({ path: "", model: null, sandbox: "workspace-write", maxTurns: 50 }),
-    pi:     () => ({ path: "", model: null, provider: null, maxTurns: 50 }),
-    gemini: () => ({ path: "", model: null, approvalMode: "auto_edit", maxTurns: 50 }),
-  };
-  const agents = config.agents as unknown as Record<Agent, unknown>;
-  for (const a of ALL_AGENTS) {
-    if (!agents[a]) agents[a] = defaultAgentEntries[a]();
-  }
+// Load, parse, and validate config.json. Throws ConfigFatalError on any
+// config-class fatal condition (missing/unparsable file, missing token,
+// zero usable agent CLIs) — the boot loop below retries those instead of
+// crash-looping under launchd. Any other thrown error is a genuine,
+// unexpected bug and propagates so launchd restarts the process (throttled
+// to 60s).
+function loadAndValidateConfig(): Config {
+  // Reset to the full candidate list on every attempt — a previous failed
+  // attempt may have narrowed AGENT_NAMES down (e.g. to []) before hitting
+  // a later fatal check, and a retry must re-scan everything fresh.
+  AGENT_NAMES = [...ALL_AGENTS];
 
-  const usable: Agent[] = [];
-  for (const a of AGENT_NAMES) {
-    const p = config.agents[a]?.path;
-    if (p && existsSync(p)) { usable.push(a); continue; }
-    const resolved = resolveCliPath(a);
-    if (!resolved) {
-      const detail = p
-        ? `configured path missing (${p}) and auto-discovery failed`
-        : "not installed (auto-discovery found no binary)";
-      console.error(`config.json: agents.${a} skipped — ${detail}.`);
-      continue;
-    }
-    if (p && p !== resolved) {
-      console.error(`config.json: agents.${a}.path missing (${p}); using ${resolved}`);
-    } else if (!p) {
-      console.error(`config.json: agents.${a}.path auto-resolved to ${resolved}`);
-    }
-    config.agents[a]!.path = resolved;
-    usable.push(a);
+  let config: Config;
+  try {
+    config = JSON.parse(readFileSync(CONFIG_FILE, "utf8"));
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    throw new ConfigFatalError(`config.json: could not read/parse (${detail})`);
   }
-  AGENT_NAMES = usable;
+  if (!config.token || config.token.startsWith("PASTE_")) {
+    throw new ConfigFatalError("config.json: token not set");
+  }
+  // Resolve agent CLI paths. A blank or missing `path` triggers auto-discovery
+  // (well-known locations, nvm scan, login-shell fallback) so the bot works on
+  // any user's machine without hand-edited absolute paths. An explicit path that
+  // exists is honored as-is — auto-discovery is opt-in by omission.
+  //
+  // Agents whose CLI cannot be located are DROPPED from AGENT_NAMES rather than
+  // killing the bot — users routinely pick a subset (claude only, or claude +
+  // codex without pi, etc.) and earlier versions refused to start in that case.
+  {
+    // A config.json written by an older cliclaw (before a given agent
+    // existed) won't have that agent's entry at all. Auto-create a minimal
+    // placeholder so the resolver + later config.agents[a].path = ...
+    // assignment don't crash with "undefined is not an object". Defaults
+    // mirror config.example.json shape; the user is free to edit them.
+    const defaultAgentEntries: Record<Agent, () => Record<string, unknown>> = {
+      claude: () => ({ path: "", model: "sonnet", maxTurns: 100 }),
+      codex:  () => ({ path: "", model: null, sandbox: "workspace-write", maxTurns: 50 }),
+      pi:     () => ({ path: "", model: null, provider: null, maxTurns: 50 }),
+      gemini: () => ({ path: "", model: null, approvalMode: "auto_edit", maxTurns: 50 }),
+    };
+    const agents = config.agents as unknown as Record<Agent, unknown>;
+    for (const a of ALL_AGENTS) {
+      if (!agents[a]) agents[a] = defaultAgentEntries[a]();
+    }
+
+    const usable: Agent[] = [];
+    for (const a of AGENT_NAMES) {
+      const p = config.agents[a]?.path;
+      if (p && existsSync(p)) { usable.push(a); continue; }
+      const resolved = resolveCliPath(a);
+      if (!resolved) {
+        const detail = p
+          ? `configured path missing (${p}) and auto-discovery failed`
+          : "not installed (auto-discovery found no binary)";
+        console.error(`config.json: agents.${a} skipped — ${detail}.`);
+        continue;
+      }
+      if (p && p !== resolved) {
+        console.error(`config.json: agents.${a}.path missing (${p}); using ${resolved}`);
+      } else if (!p) {
+        console.error(`config.json: agents.${a}.path auto-resolved to ${resolved}`);
+      }
+      config.agents[a]!.path = resolved;
+      usable.push(a);
+    }
+    AGENT_NAMES = usable;
+  }
+  if (AGENT_NAMES.length === 0) {
+    throw new ConfigFatalError(
+      "No coding agent CLIs are available on this machine. " +
+        "Install at least one of: claude (Claude Code), codex, pi.",
+    );
+  }
+  if (!AGENT_NAMES.includes(config.defaultAgent)) {
+    console.error(
+      `config.json: defaultAgent='${config.defaultAgent}' is not installed; ` +
+        `falling back to '${AGENT_NAMES[0]}'. ` +
+        `Available: ${AGENT_NAMES.join(", ")}.`,
+    );
+    config.defaultAgent = AGENT_NAMES[0];
+  }
+  return config;
 }
-if (AGENT_NAMES.length === 0) {
-  console.error(
-    "No coding agent CLIs are available on this machine. " +
-      "Install at least one of: claude (Claude Code), codex, pi.",
-  );
-  process.exit(1);
-}
-if (!AGENT_NAMES.includes(config.defaultAgent)) {
-  console.error(
-    `config.json: defaultAgent='${config.defaultAgent}' is not installed; ` +
-      `falling back to '${AGENT_NAMES[0]}'. ` +
-      `Available: ${AGENT_NAMES.join(", ")}.`,
-  );
-  config.defaultAgent = AGENT_NAMES[0];
+
+let config: Config;
+for (;;) {
+  try {
+    config = loadAndValidateConfig();
+    break;
+  } catch (err) {
+    if (!isConfigFatalError(err)) throw err;
+    const reason = err instanceof Error ? err.message : String(err);
+    console.error(`FATAL: ${reason} — retrying config load every 60s`);
+    await Bun.sleep(60_000);
+  }
 }
 // Resolve a relative cwd against the user's CLICLAW_HOME so launchctl /
 // cron / arbitrary working directories all yield the same workspace path.
 config.cwd = resolvePath(HOME, config.cwd);
 mkdirSync(config.cwd, { recursive: true });
+
+// ---------- single-instance lock ----------
+// Only one bot process may run per CLICLAW_HOME — two pollers racing the
+// same Telegram getUpdates offset would double-handle messages and stomp
+// each other's session files. Acquired only after config loads successfully
+// (D7) so a dormant, still-unconfigured process never holds the lock.
+function isLikelyCliclawProcess(pid: number): boolean {
+  try {
+    const out = execFileSync("ps", ["-p", String(pid), "-o", "command="], {
+      timeout: 5000,
+      encoding: "utf8",
+    });
+    return out.includes("cliclaw") || out.includes("bot.ts");
+  } catch {
+    return false;
+  }
+}
+{
+  const lockResult = acquireInstanceLock(HOME, isLikelyCliclawProcess);
+  if (!lockResult.acquired) {
+    console.error(
+      `FATAL: another cliclaw instance (pid ${lockResult.holderPid}) holds ${HOME}/bot.pid — stop it or delete the file if stale`,
+    );
+    process.exit(0);
+  }
+}
 
 // `confirmGateEnabled` reflects whether the hook infrastructure is wired up
 // at all (set once at boot from config). `safetyEnabled` is the runtime
@@ -534,6 +594,13 @@ function makeToolIndicator(chatId: number): ToolIndicator {
   });
 }
 
+// ---------- chat policy ----------
+// cliclaw only supports 1:1 chats — group/supergroup/channel chats never
+// get a working agent session (D1's per-chat isolation assumes exactly one
+// human per chat). Tracks which non-private chats already got the "1:1
+// only" notice so a chatty group doesn't get it repeated on every message.
+const nonPrivateChatsWarned = new Set<number>();
+
 // ---------- confirm gate ----------
 interface ConfirmMsgRecord { messageId: number; chatId: number; }
 const confirmMessages = new Map<string, ConfirmMsgRecord>();
@@ -637,6 +704,7 @@ async function promptConfirm(req: ConfirmRequest): Promise<void> {
 }
 
 async function handleCallbackQuery(q: TgCallbackQuery): Promise<void> {
+  if (q.message && isNonPrivateChat(q.message.chat.type)) return;
   const userId = q.from.id;
   if (!config.allowedUserIds.includes(userId)) {
     await tg("answerCallbackQuery", { callback_query_id: q.id, text: "권한 없음" });
@@ -682,6 +750,15 @@ async function runClaude(
   stream: StreamingMessage | null,
 ): Promise<AgentResult> {
   const c = config.agents.claude;
+  // Per-chat cwd so concurrent chats don't share Claude's --continue session
+  // (same rationale as runGemini's sessionDir below — Claude resumes "the
+  // most-recent session in cwd", so a shared cwd has every chat stomp the
+  // same session). The confirm-gate hook + safety deny rules must follow
+  // this move (D2) — Claude reads .claude/settings.json from its own cwd,
+  // so re-ensure them here on every call rather than only once at boot
+  // against the old shared config.cwd.
+  const claudeSessionDir = agentSessionDir("claude", chatId);
+  installClaudeSettingsInto(claudeSessionDir);
   // bypassPermissions: headless 모드에서 권한 ask 프롬프트는 자동 거절로
   // 끝나 사용자 응답을 받을 수 없다. Bash 도구는 PreToolUse confirm 훅이
   // 텔레그램으로 다시 묻고, 그 외 도구(WebFetch 등)는 allowedUserIds로
@@ -779,7 +856,7 @@ async function runClaude(
   const timeoutMs = agentTimeoutMs("claude");
   const idleTimeoutMs = agentIdleTimeoutMs("claude");
   const { exitCode, stderr, killedReason } = await runSubprocessStream(c.path, args, {
-    cwd: config.cwd,
+    cwd: claudeSessionDir,
     env: confirmGateEnv(chatId, "claude"),
     timeoutMs,
     idleTimeoutMs,
@@ -1081,29 +1158,53 @@ async function runAgent(
 }
 
 // ---------- workspace settings (Claude project hook) ----------
-function ensureWorkspaceClaudeSettings(): void {
+/**
+ * Install (or refresh) the bash-confirm hook + safety deny rules into a
+ * single Claude working directory's settings.json. Both writes are
+ * idempotent (see lib/hook-installer.ts), so calling this repeatedly for
+ * the same dir is cheap and safe. Called for config.cwd at boot and for
+ * each chat's per-chat claude session dir (D1/D2: moving Claude's cwd
+ * without moving these settings would silently disable the confirm gate
+ * and deny rules for that chat).
+ */
+function installClaudeSettingsInto(dir: string): void {
   if (!confirmGateEnabled) return;
-  const settingsPath = join(config.cwd, ".claude", "settings.json");
+  const settingsPath = join(dir, ".claude", "settings.json");
   try { installBashConfirmHook(settingsPath, `bun ${HOOK_SCRIPT}`); }
-  catch (err) { log("error", `install claude workspace hook failed: ${err}`); }
-  applySafetyDenyRules();
+  catch (err) { log("error", `install claude hook (${dir}) failed: ${err}`); }
+  try {
+    if (safetyEnabled) installSafetyDeny(settingsPath);
+    else uninstallSafetyDeny(settingsPath);
+  } catch (err) {
+    log("error", `apply safety deny rules (${dir}) failed: ${err}`);
+  }
+}
+
+function ensureWorkspaceClaudeSettings(): void {
+  installClaudeSettingsInto(config.cwd);
 }
 
 /**
  * Apply (or remove) Claude's permissions.deny rules for sensitive paths.
  * Mirrors the live `safetyEnabled` flag, so toggling /safety on|off in
- * Telegram updates the workspace settings.json without a bot restart.
- * Confirm gate must be enabled at boot — when it isn't the hook isn't
- * installed and these deny rules wouldn't be enforced by anyone either.
+ * Telegram updates settings.json without a bot restart — for config.cwd
+ * AND every chat's per-chat claude session dir (D1 moved Claude's cwd
+ * per-chat, so a toggle must reach all of them immediately, not just
+ * lazily at each chat's next message). Confirm gate must be enabled at
+ * boot — when it isn't the hook isn't installed and these deny rules
+ * wouldn't be enforced by anyone either.
  */
 function applySafetyDenyRules(): void {
-  if (!confirmGateEnabled) return;
-  const settingsPath = join(config.cwd, ".claude", "settings.json");
+  installClaudeSettingsInto(config.cwd);
+  const claudeSessionsRoot = join(SESSION_ROOT, "claude");
+  let chatDirNames: string[] = [];
   try {
-    if (safetyEnabled) installSafetyDeny(settingsPath);
-    else uninstallSafetyDeny(settingsPath);
-  } catch (err) {
-    log("error", `apply safety deny rules failed: ${err}`);
+    chatDirNames = readdirSync(claudeSessionsRoot, { withFileTypes: true })
+      .filter((e) => e.isDirectory())
+      .map((e) => e.name);
+  } catch { /* no per-chat claude sessions yet — fine */ }
+  for (const name of chatDirNames) {
+    installClaudeSettingsInto(join(claudeSessionsRoot, name));
   }
 }
 
@@ -1355,6 +1456,14 @@ async function handleMessage(msg: TgMessage): Promise<void> {
   const chatId = msg.chat.id;
   // Telegram uses `text` for plain messages and `caption` for media messages.
   let text = (msg.text ?? msg.caption ?? "").trim();
+
+  if (isNonPrivateChat(msg.chat.type)) {
+    if (!nonPrivateChatsWarned.has(chatId)) {
+      nonPrivateChatsWarned.add(chatId);
+      await sendMessage(chatId, "이 봇은 1:1 채팅에서만 동작합니다. 그룹에서는 사용할 수 없어요.");
+    }
+    return;
+  }
   if (!userId) return;
 
   if (config.allowedUserIds.length === 0) {
@@ -1592,6 +1701,7 @@ const shutdown = (signal: string): void => {
   running = false;
   // Best-effort: stop confirm server so the socket file is cleaned up.
   void confirmServer?.stop().catch(() => {});
+  releaseInstanceLock(HOME);
 };
 process.on("SIGINT", () => shutdown("SIGINT"));
 process.on("SIGTERM", () => shutdown("SIGTERM"));

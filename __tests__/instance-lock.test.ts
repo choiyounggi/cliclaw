@@ -61,6 +61,33 @@ describe("acquireInstanceLock", () => {
     const result = acquireInstanceLock(home);
     expect(result).toEqual({ acquired: false, holderPid: -1 });
   });
+
+  it("reclaims a lock whose live holder fails validateHolder (PID reuse guard)", async () => {
+    const home = tmp("invalid-holder");
+    const child = spawn("sleep", ["5"]);
+    await new Promise<void>((resolve) => child.once("spawn", () => resolve()));
+    writeFileSync(join(home, "bot.pid"), String(child.pid));
+    try {
+      const result = acquireInstanceLock(home, () => false);
+      expect(result).toEqual({ acquired: true });
+      expect(readFileSync(join(home, "bot.pid"), "utf8")).toBe(String(process.pid));
+    } finally {
+      child.kill();
+    }
+  });
+
+  it("does not reclaim a lock whose live holder passes validateHolder", async () => {
+    const home = tmp("valid-holder");
+    const child = spawn("sleep", ["5"]);
+    await new Promise<void>((resolve) => child.once("spawn", () => resolve()));
+    writeFileSync(join(home, "bot.pid"), String(child.pid));
+    try {
+      const result = acquireInstanceLock(home, () => true);
+      expect(result).toEqual({ acquired: false, holderPid: child.pid });
+    } finally {
+      child.kill();
+    }
+  });
 });
 
 describe("releaseInstanceLock", () => {

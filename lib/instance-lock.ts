@@ -9,6 +9,12 @@
  * outcome that means the holder is gone, so a lock left behind by a crash
  * can be reclaimed; any other outcome (alive, EPERM, or an unreadable/
  * corrupt lock file) is treated as still-held so we never double-acquire.
+ *
+ * An alive PID isn't proof it's still *our* holder — PIDs get reused, so a
+ * crashed bot's PID can end up belonging to an unrelated process by the time
+ * we check. Callers may pass `validateHolder` to confirm the live PID is
+ * actually still a cliclaw instance; a live-but-invalid holder is reclaimed
+ * the same way as a dead one.
  */
 
 import { writeFileSync, readFileSync, unlinkSync } from "node:fs";
@@ -46,7 +52,16 @@ function writeOwnPid(path: string): void {
   writeFileSync(path, String(process.pid), { flag: "wx" });
 }
 
-export function acquireInstanceLock(home: string): AcquireResult {
+/**
+ * @param validateHolder  Optional identity check for a holder PID that IS
+ *   alive (a plain liveness check can't tell "still our bot" from "PID got
+ *   reused by an unrelated process after a crash"). Returning false treats
+ *   the lock as stale and reclaims it via the same path as a dead holder.
+ */
+export function acquireInstanceLock(
+  home: string,
+  validateHolder?: (pid: number) => boolean,
+): AcquireResult {
   const path = lockPath(home);
 
   try {
@@ -57,9 +72,13 @@ export function acquireInstanceLock(home: string): AcquireResult {
   }
 
   const holderPid = readHolderPid(path);
-  if (holderPid !== null && !isProcessAlive(holderPid)) {
-    // Stale — the recorded holder is gone. Reclaim by removing the file and
-    // retrying the exclusive write exactly once.
+  const holderIsStale =
+    holderPid !== null &&
+    (!isProcessAlive(holderPid) || (validateHolder !== undefined && !validateHolder(holderPid)));
+  if (holderIsStale) {
+    // Stale — the recorded holder is gone (or alive but not us, e.g. a
+    // reused PID). Reclaim by removing the file and retrying the exclusive
+    // write exactly once.
     try {
       unlinkSync(path);
     } catch {
