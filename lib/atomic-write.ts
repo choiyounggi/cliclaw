@@ -11,8 +11,9 @@ import { writeFileSync, renameSync } from "node:fs";
  * stays on one filesystem); the caller is responsible for ensuring that
  * directory exists.
  */
-export function writeFileAtomic(path: string, data: string): void {
+export function writeFileAtomic(path: string, data: string, opts?: { mode?: number }): void {
   const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
-  writeFileSync(tmp, data);
+  if (opts?.mode !== undefined) writeFileSync(tmp, data, { mode: opts.mode });
+  else writeFileSync(tmp, data);
   renameSync(tmp, path);
 }

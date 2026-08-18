@@ -1,4 +1,5 @@
-/// <reference types="bun" />
+import { spawn } from "node:child_process";
+import type { Readable } from "node:stream";
 
 export interface StreamSubprocessOptions {
   cwd: string;
@@ -26,29 +27,40 @@ export interface StreamSubprocessResult {
  * Spawn a subprocess and stream stdout/stderr line-by-line via callbacks while
  * also accumulating the full output for the caller. Supports external cancellation
  * and a hard timeout — both deliver SIGTERM, then SIGKILL after a grace period if
- * the process is still alive.
+ * the process is still alive. The child is spawned detached as the leader of its
+ * own process group, and kill signals target the whole group (negative pid) so a
+ * backgrounded grandchild the child spawns dies with it too.
  */
 export async function runSubprocessStream(
   bin: string,
   args: string[],
   opts: StreamSubprocessOptions,
 ): Promise<StreamSubprocessResult> {
-  const proc = Bun.spawn([bin, ...args], {
+  const proc = spawn(bin, args, {
     cwd: opts.cwd,
-    stdin: "ignore",
-    stdout: "pipe",
-    stderr: "pipe",
+    stdio: ["ignore", "pipe", "pipe"],
+    detached: true,
     env: { ...process.env, FORCE_COLOR: "0", NO_COLOR: "1", ...(opts.env ?? {}) },
   });
 
   let killedReason: StreamSubprocessResult["killedReason"] = null;
 
+  const killGroup = (signal: NodeJS.Signals): void => {
+    if (proc.pid == null) return;
+    try {
+      process.kill(-proc.pid, signal);
+    } catch {
+      // ESRCH (process group already gone) or any other kill failure — the
+      // group is already unreachable, which is the outcome we wanted anyway.
+    }
+  };
+
   const kill = (reason: "timeout" | "abort" | "idle"): void => {
     if (killedReason) return;
     killedReason = reason;
-    try { proc.kill("SIGTERM"); } catch { /* already dead */ }
+    killGroup("SIGTERM");
     setTimeout(() => {
-      try { proc.kill("SIGKILL"); } catch { /* already dead */ }
+      killGroup("SIGKILL");
     }, 5000).unref?.();
   };
 
@@ -69,6 +81,13 @@ export async function runSubprocessStream(
 
   const wrappedStdout = opts.onStdoutLine ? (line: string) => { resetIdle(); opts.onStdoutLine!(line); } : (opts.idleTimeoutMs ? () => resetIdle() : undefined);
 
+  let exitCode: number | null = null;
+  const exited = new Promise<void>((resolve) => {
+    const done = (code: number | null): void => { exitCode = code; resolve(); };
+    proc.once("exit", (code) => done(code));
+    proc.once("error", () => done(null));
+  });
+
   let stdout = "";
   let stderr = "";
   try {
@@ -76,7 +95,7 @@ export async function runSubprocessStream(
       drainStream(proc.stdout, wrappedStdout),
       drainStream(proc.stderr, opts.onStderrLine),
     ]);
-    await proc.exited;
+    await exited;
   } finally {
     // Always release timers + the abort listener. Without this, a drain/exit
     // rejection would leak them — keeping a dead process's SIGKILL timer armed
@@ -87,7 +106,7 @@ export async function runSubprocessStream(
   }
 
   return {
-    exitCode: proc.exitCode ?? -1,
+    exitCode: exitCode ?? -1,
     stdout,
     stderr,
     killedReason,
@@ -95,24 +114,21 @@ export async function runSubprocessStream(
 }
 
 async function drainStream(
-  stream: ReadableStream<Uint8Array> | null,
+  stream: Readable | null,
   onLine: ((line: string) => void) | undefined,
 ): Promise<string> {
   if (!stream) return "";
-  const reader = stream.getReader();
   const decoder = new TextDecoder();
   let buf = "";
   let full = "";
   try {
-    while (true) {
-      // Catch read rejection (broken pipe on a crashed/killed child) and stop
-      // draining gracefully — propagating would skip the caller's cleanup.
-      const result = await reader.read().catch(() => null);
-      if (!result || result.done) break;
-      const chunk = decoder.decode(result.value, { stream: true });
-      full += chunk;
+    // Async iteration works the same way over Node Readable streams as it did
+    // over the Web ReadableStream this replaced.
+    for await (const chunk of stream) {
+      const text = typeof chunk === "string" ? chunk : decoder.decode(chunk, { stream: true });
+      full += text;
       if (!onLine) continue;
-      buf += chunk;
+      buf += text;
       let nl = buf.indexOf("\n");
       while (nl !== -1) {
         const line = buf.slice(0, nl);
@@ -124,8 +140,8 @@ async function drainStream(
     if (onLine && buf.length > 0) {
       try { onLine(buf); } catch { /* swallow */ }
     }
-  } finally {
-    reader.releaseLock();
+  } catch {
+    // Broken pipe on a crashed/killed child — stop draining gracefully.
   }
   return full;
 }

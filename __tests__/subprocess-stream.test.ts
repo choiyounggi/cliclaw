@@ -108,4 +108,58 @@ describe("runSubprocessStream", () => {
     });
     expect(r.stdout).toBe("hello");
   });
+
+  // Polls for a pid to disappear from the process table instead of asserting
+  // immediately after kill — signal delivery + reaping isn't synchronous.
+  async function pollUntilDead(pid: number, maxMs = 3000): Promise<boolean> {
+    const start = Date.now();
+    while (Date.now() - start < maxMs) {
+      try {
+        process.kill(pid, 0);
+      } catch {
+        return true;
+      }
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    return false;
+  }
+
+  it("group-kills a backgrounded grandchild process on abort", async () => {
+    const ctrl = new AbortController();
+    let grandchildPid = "";
+    const p = runSubprocessStream(
+      "/bin/sh",
+      ["-c", "sleep 30 & echo $!; wait"],
+      {
+        cwd: process.cwd(),
+        timeoutMs: 60_000,
+        signal: ctrl.signal,
+        onStdoutLine: (l) => { grandchildPid = l.trim(); },
+      },
+    );
+    // Let the shell background `sleep 30` and print its pid before we abort.
+    await new Promise((r) => setTimeout(r, 200));
+    ctrl.abort();
+    const r = await p;
+    expect(r.killedReason).toBe("abort");
+    expect(grandchildPid).toMatch(/^\d+$/);
+    expect(await pollUntilDead(Number(grandchildPid))).toBe(true);
+  });
+
+  it("escalates to SIGKILL after ~5s when the child traps and ignores SIGTERM", async () => {
+    const ctrl = new AbortController();
+    const start = Date.now();
+    const p = runSubprocessStream(
+      "/bin/sh",
+      ["-c", "trap '' TERM; while true; do :; done"],
+      { cwd: process.cwd(), timeoutMs: 60_000, signal: ctrl.signal },
+    );
+    setTimeout(() => ctrl.abort(), 100);
+    const r = await p;
+    const elapsedMs = Date.now() - start;
+    expect(r.killedReason).toBe("abort");
+    expect(r.exitCode).not.toBe(0);
+    // SIGTERM alone was ignored — only the 5s SIGKILL escalation could have ended it.
+    expect(elapsedMs).toBeGreaterThanOrEqual(4900);
+  }, 15_000);
 });

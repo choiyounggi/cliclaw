@@ -47,4 +47,47 @@ describe("audit-log", () => {
     // the public guarantee that valid writes succeed silently.
     expect(() => w.write({ chatId: 1, type: "error", data: {} })).not.toThrow();
   });
+
+  it("createAuditWriter: redact applies to top-level and nested string values", () => {
+    const dir = mkdtempSync(join(process.cwd(), ".claude/tmp/audit-test-"));
+    const file = join(dir, "audit.jsonl");
+    const redact = (s: string) => s.replace(/secret-\w+/g, "[REDACTED]");
+    const w = createAuditWriter(file, undefined, { redact });
+    w.write({
+      chatId: 1,
+      type: "msg_in",
+      agent: "secret-agent",
+      data: { text: "token=secret-abc123", nested: { note: "still secret-xyz" } },
+    });
+    const record = JSON.parse(readFileSync(file, "utf8").trim());
+    expect(record.agent).toBe("[REDACTED]");
+    expect(record.data.text).toBe("token=[REDACTED]");
+    expect(record.data.nested.note).toBe("still [REDACTED]");
+  });
+
+  it("createAuditWriter: no redactor passed = current passthrough behavior", () => {
+    const dir = mkdtempSync(join(process.cwd(), ".claude/tmp/audit-test-"));
+    const file = join(dir, "audit.jsonl");
+    const w = createAuditWriter(file);
+    w.write({ chatId: 1, type: "msg_in", data: { text: "secret-abc123" } });
+    const record = JSON.parse(readFileSync(file, "utf8").trim());
+    expect(record.data.text).toBe("secret-abc123");
+  });
+
+  it("createAuditWriter: redact leaves non-string values (numbers, arrays) untouched", () => {
+    const dir = mkdtempSync(join(process.cwd(), ".claude/tmp/audit-test-"));
+    const file = join(dir, "audit.jsonl");
+    const redact = (s: string) => s.toUpperCase();
+    const w = createAuditWriter(file, undefined, { redact });
+    w.write({
+      chatId: 42,
+      type: "msg_in",
+      data: { count: 3, tags: ["a", "b"], empty: "" },
+    });
+    const record = JSON.parse(readFileSync(file, "utf8").trim());
+    expect(record.chatId).toBe(42);
+    expect(record.data.count).toBe(3);
+    expect(record.data.tags).toEqual(["a", "b"]);
+    expect(record.data.empty).toBe("");
+  });
 });

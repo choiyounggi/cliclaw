@@ -62,3 +62,10 @@ describe("renderPlist — extraEnv", () => {
     expect(out).not.toContain("<one>");
   });
 });
+
+describe("renderPlist — ThrottleInterval", () => {
+  it("sets ThrottleInterval to 60s to slow crash-loop restarts", () => {
+    const out = renderPlist("com.me.cliclaw", BASE);
+    expect(out).toMatch(/<key>ThrottleInterval<\/key>\s*<integer>60<\/integer>/);
+  });
+});

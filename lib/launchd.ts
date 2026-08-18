@@ -92,7 +92,7 @@ export function renderPlist(label: string, opts: LaunchdOptions): string {
         <true/>
     </dict>
     <key>ThrottleInterval</key>
-    <integer>10</integer>
+    <integer>60</integer>
     <key>StandardOutPath</key>
     <string>${escape(join(stateDir, "logs", "bot.log"))}</string>
     <key>StandardErrorPath</key>

@@ -33,6 +33,18 @@ export interface StreamOptions {
   placeholder?: string;
   /** Logger for transport errors. Default no-op. */
   onError?: (err: unknown) => void;
+  /**
+   * Called with a slot's text once that slot has failed to send/edit 3
+   * consecutive times. Return true if the fallback delivered the content
+   * (stops retrying that slot); return false (or reject) to keep retrying
+   * via the normal send/edit path.
+   */
+  fallbackSend?: (text: string) => Promise<boolean>;
+  /**
+   * Measures a candidate slot's length for the rollover decision — e.g. the
+   * length of converted HTML rather than raw text. Defaults to `text.length`.
+   */
+  measure?: (text: string) => number;
 }
 
 export interface StreamingMessage {
@@ -48,7 +60,7 @@ const DEFAULT_INTERVAL = 1500;
 const DEFAULT_ROLLOVER = 3800;
 const DEFAULT_PLACEHOLDER = "…";
 
-interface Slot { id: number | null; start: number; lastSentText: string; }
+interface Slot { id: number | null; start: number; lastSentText: string; consecutiveFailures: number; }
 
 export function createStreamingMessage(opts: StreamOptions): StreamingMessage {
   const minInterval = opts.minIntervalMs ?? DEFAULT_INTERVAL;
@@ -75,19 +87,20 @@ export function createStreamingMessage(opts: StreamOptions): StreamingMessage {
   const flushNow = async (): Promise<void> => {
     // Plan: ensure slot list covers the whole buffer with no overflow.
     if (slots.length === 0) {
-      slots.push({ id: null, start: 0, lastSentText: "" });
+      slots.push({ id: null, start: 0, lastSentText: "", consecutiveFailures: 0 });
     }
     // Roll over any trailing slot that overflows.
     while (true) {
       const last = slots[slots.length - 1];
       const text = buffer.slice(last.start);
-      if (text.length <= rolloverChars) break;
+      const measuredLen = opts.measure ? opts.measure(text) : text.length;
+      if (measuredLen <= rolloverChars) break;
       // Pick a split point: rolloverChars, but back up to the previous newline
       // if one exists within the last 200 chars (nicer reading).
       let split = rolloverChars;
       const newlineHint = text.lastIndexOf("\n", rolloverChars);
       if (newlineHint > 0 && newlineHint >= rolloverChars - 200) split = newlineHint + 1;
-      slots.push({ id: null, start: last.start + split, lastSentText: "" });
+      slots.push({ id: null, start: last.start + split, lastSentText: "", consecutiveFailures: 0 });
     }
     // Now send/edit each slot in order.
     for (const slot of slots) {
@@ -104,7 +117,21 @@ export function createStreamingMessage(opts: StreamOptions): StreamingMessage {
           await opts.edit(opts.chatId, slot.id, display);
         }
         slot.lastSentText = text;
-      } catch (err) { onError(err); }
+        slot.consecutiveFailures = 0;
+      } catch (err) {
+        onError(err);
+        slot.consecutiveFailures += 1;
+        if (slot.consecutiveFailures >= 3 && opts.fallbackSend) {
+          let delivered = false;
+          try {
+            delivered = await opts.fallbackSend(display);
+          } catch (fallbackErr) { onError(fallbackErr); }
+          if (delivered) {
+            slot.lastSentText = text;
+            slot.consecutiveFailures = 0;
+          }
+        }
+      }
     }
     lastFlushAt = Date.now();
   };

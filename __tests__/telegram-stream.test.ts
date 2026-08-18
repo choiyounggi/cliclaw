@@ -156,4 +156,81 @@ describe("createStreamingMessage", () => {
     expect(ordering.at(-1)).toBe("close-end");
     expect(ordering).toContain("edit-done");
   });
+
+  it("calls fallbackSend on the 3rd consecutive failure; success stops further retries", async () => {
+    const errs: unknown[] = [];
+    const fallbackCalls: string[] = [];
+    const send: SendFn = async () => { throw new Error("boom"); };
+    const edit: EditFn = async () => { throw new Error("boom"); };
+    const s = createStreamingMessage({
+      chatId: 1, send, edit, minIntervalMs: 10,
+      onError: (e) => errs.push(e),
+      fallbackSend: async (text) => { fallbackCalls.push(text); return true; },
+    });
+    s.append("one");
+    await sleep(30); // flush 1: fails (consecutiveFailures=1)
+    s.append(" two");
+    await sleep(30); // flush 2: fails (consecutiveFailures=2)
+    s.append(" three");
+    await sleep(30); // flush 3: fails -> 3rd consecutive failure triggers fallbackSend
+    await s.close();
+    expect(fallbackCalls).toHaveLength(1);
+    expect(fallbackCalls[0]).toBe("one two three");
+    // 3 send attempts total, no extra retry after the fallback marked the slot delivered.
+    expect(errs.length).toBe(3);
+  });
+
+  it("keeps retrying via the normal path when fallbackSend returns false", async () => {
+    const r = makeRecorder();
+    let attempt = 0;
+    const send: SendFn = async (chatId, text) => {
+      attempt++;
+      if (attempt <= 3) throw new Error("boom");
+      return r.send(chatId, text);
+    };
+    const fallbackCalls: string[] = [];
+    const s = createStreamingMessage({
+      chatId: 1, send, edit: r.edit, minIntervalMs: 10,
+      fallbackSend: async (text) => { fallbackCalls.push(text); return false; },
+    });
+    s.append("a");
+    await sleep(30); // attempt 1: fails
+    s.append("b");
+    await sleep(30); // attempt 2: fails
+    s.append("c");
+    await sleep(30); // attempt 3: fails -> fallback called, returns false -> keep retrying
+    s.append("d");
+    await sleep(30); // attempt 4: send finally succeeds via the normal path
+    await s.close();
+    expect(fallbackCalls).toHaveLength(1);
+    expect(r.sends).toHaveLength(1);
+    expect(r.sends[0].text).toBe("abcd");
+  });
+
+  it("measure() overrides text.length for the rollover decision", async () => {
+    const CONTENT = "hello\nworld"; // 11 raw chars, well under rolloverChars=200
+
+    const withoutMeasure = makeRecorder();
+    const s1 = createStreamingMessage({
+      chatId: 1, send: withoutMeasure.send, edit: withoutMeasure.edit, minIntervalMs: 10, rolloverChars: 200,
+    });
+    s1.append(CONTENT);
+    await sleep(30);
+    await s1.close();
+    expect(withoutMeasure.sends).toHaveLength(1);
+
+    const withMeasure = makeRecorder();
+    const s2 = createStreamingMessage({
+      chatId: 1, send: withMeasure.send, edit: withMeasure.edit, minIntervalMs: 10, rolloverChars: 200,
+      // Simulates e.g. converted-HTML length: any segment still containing the
+      // un-split source text measures as oversized regardless of raw length.
+      measure: (text) => (text.includes("\n") ? Number.MAX_SAFE_INTEGER : text.length),
+    });
+    s2.append(CONTENT);
+    await sleep(30);
+    await s2.close();
+    // Same raw content that fit in one message above now rolls over into two,
+    // because measure() (not text.length) decided it was too long.
+    expect(withMeasure.sends).toHaveLength(2);
+  });
 });
