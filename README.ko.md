@@ -1,5 +1,7 @@
 # cliclaw
 
+**맥에서 돌아가는 Claude Code · Codex · Pi · Gemini를 — 폰에서, 텔레그램으로 조종하세요.**
+
 <p>
   <a href="https://github.com/choiyounggi/cliclaw/actions/workflows/test.yml"><img alt="Test" src="https://github.com/choiyounggi/cliclaw/actions/workflows/test.yml/badge.svg"></a>
   <a href="https://www.npmjs.com/package/@younggichoi/cliclaw"><img alt="npm" src="https://img.shields.io/npm/v/@younggichoi/cliclaw?logo=npm"></a>
@@ -11,7 +13,9 @@
 
 [English](README.md) | **한국어**
 
-네 가지 로컬 코딩 CLI(**Claude Code · Codex · Pi · Gemini**)를 텔레그램에서 바꿔가며 쓸 수 있게 해주는 단일 데몬.
+코딩 에이전트는 긴 작업에 강하지만, 자리를 비운 사이 작업이 끝나 있거나 y/n 확인을 기다리며 멈춰 있곤 합니다. cliclaw는 그 족쇄를 없앱니다: 자리를 뜨기 전에 작업을 시켜두고, 텔레그램으로 진행 상황을 스트리밍 받고, 위험 명령은 폰에서 승인/거부하고, 어디서든 후속 지시를 보내세요.
+
+내부적으로는 맥에서 도는 단일 데몬이 텔레그램 채팅을 네 가지 로컬 코딩 CLI(**Claude Code · Codex · Pi · Gemini**)의 리모컨으로 바꿔주며, 채팅마다 에이전트를 전환해가며 쓸 수 있습니다.
 
 채팅마다 에이전트별 세션을 독립적으로 유지하고, 위험 명령에 대한 confirm 게이트, 응답 스트리밍, 이미지 첨부 처리, 회사망(Zscaler 등) TLS 인터셉터 자동 감지까지 지원합니다.
 

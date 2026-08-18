@@ -5,7 +5,7 @@
     "access": "public"
   },
   "type": "module",
-  "description": "Telegram bridge for local coding agents (Claude Code, Codex, Gemini, Pi) — per-chat sessions, a confirm gate for dangerous commands, secret masking, streaming, and image attachments.",
+  "description": "Control coding agents on your Mac (Claude Code, Codex, Gemini, Pi) from your phone via Telegram — kick off tasks, stream progress, and approve dangerous commands while away from your desk.",
   "license": "MIT",
   "repository": {
     "type": "git",

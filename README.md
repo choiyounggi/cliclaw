@@ -1,5 +1,8 @@
 # cliclaw
-<img width="617" height="448" alt="스크린샷 2026-07-27 오후 2 18 46" src="https://github.com/user-attachments/assets/d6204699-11a2-4c8b-a100-4a2527f91c75" />
+
+**Control Claude Code, Codex, Pi & Gemini running on your Mac — from your phone, via Telegram.**
+
+<img width="617" height="448" alt="cliclaw in Telegram: driving a local coding agent from the phone" src="https://github.com/user-attachments/assets/d6204699-11a2-4c8b-a100-4a2527f91c75" />
 
 <p>
   <a href="https://github.com/choiyounggi/cliclaw/actions/workflows/test.yml"><img alt="Test" src="https://github.com/choiyounggi/cliclaw/actions/workflows/test.yml/badge.svg"></a>
@@ -12,8 +15,15 @@
 
 **English** | [한국어](README.ko.md)
 
-A single daemon that lets you drive four local coding CLIs (**Claude Code ·
-Codex · Pi · Gemini**) from Telegram, switching between them per chat.
+Coding agents are great at long-running tasks — until they finish, or get stuck
+waiting for a y/n confirmation, while you're away from your desk. cliclaw
+removes the tether to your chair: kick off a task before you leave, watch
+progress stream into Telegram, approve or deny dangerous commands from your
+phone, and send follow-up instructions from wherever you are.
+
+Under the hood it's a single daemon on your Mac that turns a Telegram chat into
+a remote control for four local coding CLIs (**Claude Code · Codex · Pi ·
+Gemini**), switching between them per chat.
 
 It keeps an independent per-agent session for every chat, and ships a confirm
 gate for dangerous commands, response streaming, image-attachment handling, and
