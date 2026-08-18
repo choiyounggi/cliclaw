@@ -72,6 +72,19 @@ export async function runInit(opts: SetupOptions): Promise<void> {
       fail("Aborted by user.");
       process.exit(1);
     }
+    // Re-running init must not silently drop users authorized by a prior
+    // run — merge by default, and only replace on an explicit opt-in.
+    const existingUserIds = readExistingAllowedUserIds(opts.home);
+    let allowedUserIds: number[];
+    if (existingUserIds.length > 0) {
+      info(`Existing authorized users kept: [${existingUserIds.join(", ")}]`);
+      const replace = await yesNo(rl, "Replace instead of merge?", false);
+      allowedUserIds = replace
+        ? [userId]
+        : mergeAllowedUserIds(existingUserIds, userId);
+    } else {
+      allowedUserIds = [userId];
+    }
 
     // ── Step 4: Corporate TLS CA (optional) ───────────────────────────
     section("Step 4/5 — Corporate TLS interceptor (선택)");
@@ -83,7 +96,7 @@ export async function runInit(opts: SetupOptions): Promise<void> {
     // ── Write config.json ─────────────────────────────────────────────
     writeConfig(opts.home, {
       token,
-      allowedUserIds: [userId],
+      allowedUserIds,
       defaultAgent,
       detected,
       caCert,
@@ -161,6 +174,12 @@ async function yesNo(
   const ans = (await rl.question(`${question} ${hint} `)).trim().toLowerCase();
   if (!ans) return defaultYes;
   return ans.startsWith("y");
+}
+
+/** Dedup existing authorized user ids with the newly captured one, keeping
+ *  a re-run of init from silently revoking access for prior users. */
+export function mergeAllowedUserIds(existing: number[], captured: number): number[] {
+  return Array.from(new Set([...existing, captured]));
 }
 
 /**
@@ -260,6 +279,16 @@ interface TgUser { id: number; is_bot: boolean; username?: string; }
 interface TgMessage { from?: TgUser; chat: { id: number } }
 interface TgUpdate { update_id: number; message?: TgMessage; }
 
+/** Thrown when Telegram's API itself rejects the request (`data.ok ===
+ *  false`) — as opposed to a network-layer failure reaching it at all. This
+ *  distinction is what lets callers attribute a failure correctly instead
+ *  of always blaming the bot token. */
+export class TelegramApiError extends Error {
+  constructor(public readonly description: string) {
+    super(description);
+  }
+}
+
 async function tg<T>(token: string, method: string, body?: unknown): Promise<T> {
   const res = await fetch(`${TELEGRAM_API}/bot${token}/${method}`, {
     method: "POST",
@@ -267,39 +296,108 @@ async function tg<T>(token: string, method: string, body?: unknown): Promise<T> 
     body: body ? JSON.stringify(body) : undefined,
   });
   const data = await res.json() as { ok: boolean; result?: T; description?: string };
-  if (!data.ok) throw new Error(`telegram ${method}: ${data.description}`);
+  if (!data.ok) throw new TelegramApiError(data.description ?? "unknown error");
   return data.result as T;
+}
+
+/** Turn a `getMe` failure into an actionable message, distinguishing a
+ *  network-layer failure (fetch/DNS/TLS/proxy — never the token's fault)
+ *  from Telegram explicitly rejecting the token. */
+export function classifyGetMeError(e: unknown): string {
+  if (e instanceof TelegramApiError) {
+    return `Bot token rejected by Telegram: ${e.description}`;
+  }
+  const msg = e instanceof Error ? e.message : String(e);
+  return `Network error reaching api.telegram.org: ${msg}. Check connectivity / proxy / corporate TLS.`;
 }
 
 async function getMe(token: string): Promise<TgUser> {
   try {
     return await tg<TgUser>(token, "getMe");
   } catch (e) {
-    fail(`Bot token rejected by Telegram: ${(e as Error).message}`);
+    fail(classifyGetMeError(e));
     process.exit(1);
   }
 }
 
-async function waitForFirstMessage(token: string): Promise<number> {
-  // Drain any backlog so we only capture a *new* message after this prompt.
-  // getUpdates returns the queue; we ack everything past the highest id.
-  const drained = await tg<TgUpdate[]>(token, "getUpdates", { timeout: 0 });
-  let offset = drained.length ? drained[drained.length - 1].update_id + 1 : 0;
+/** Non-exiting variant of `getMe`, for callers (like `doctor`) that want
+ *  to report the outcome themselves instead of aborting the process. */
+export async function getMeSafe(token: string): Promise<TgUser> {
+  return tg<TgUser>(token, "getMe");
+}
 
-  const deadline = Date.now() + 5 * 60 * 1000;
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
+}
+
+/** True once at least `intervalMs` has passed since the last printed retry
+ *  note — throttles the "network hiccup" note to at most once per window
+ *  instead of once per failed poll. */
+export function shouldPrintWaitNote(lastNoteAt: number, now: number, intervalMs: number): boolean {
+  return now - lastNoteAt >= intervalMs;
+}
+
+export interface WaitForFirstMessageOptions {
+  /** Override the getUpdates call, for tests. Defaults to the real `tg()`. */
+  getUpdates?: (offset: number, timeoutSec: number) => Promise<TgUpdate[]>;
+  /** Override the retry sleep, for tests. */
+  sleepMs?: (ms: number) => Promise<void>;
+  /** Override the overall wait deadline, for tests. Default: 5 minutes. */
+  deadlineMs?: number;
+  /** Override the throttle window between retry notes, for tests. Default: 30s. */
+  noteIntervalMs?: number;
+}
+
+async function waitForFirstMessage(
+  token: string,
+  opts: WaitForFirstMessageOptions = {},
+): Promise<number> {
+  const getUpdates = opts.getUpdates
+    ?? ((offset: number, timeoutSec: number) => tg<TgUpdate[]>(token, "getUpdates", { offset, timeout: timeoutSec }));
+  const sleepMs = opts.sleepMs ?? sleep;
+  const deadlineMs = opts.deadlineMs ?? 5 * 60 * 1000;
+  const noteIntervalMs = opts.noteIntervalMs ?? 30_000;
+
+  const deadline = Date.now() + deadlineMs;
+  let offset = 0;
+  let drained = false;
+  let lastNoteAt = 0;
+
   while (Date.now() < deadline) {
-    const updates = await tg<TgUpdate[]>(token, "getUpdates", {
-      offset,
-      timeout: 25,
-    });
-    for (const u of updates) {
-      offset = u.update_id + 1;
-      const from = u.message?.from;
-      if (from && !from.is_bot) {
-        // Acknowledge so the message isn't redelivered to the running bot.
-        await tg(token, "getUpdates", { offset });
-        return from.id;
+    try {
+      if (!drained) {
+        // Drain any backlog so we only capture a *new* message after this
+        // prompt. getUpdates returns the queue; we start polling past the
+        // highest id already seen.
+        const backlog = await getUpdates(0, 0);
+        offset = backlog.length ? backlog[backlog.length - 1].update_id + 1 : 0;
+        drained = true;
+        continue;
       }
+      const updates = await getUpdates(offset, 25);
+      for (const u of updates) {
+        offset = u.update_id + 1;
+        const from = u.message?.from;
+        if (from && !from.is_bot) {
+          try {
+            // Acknowledge so the message isn't redelivered to the running
+            // bot. Best-effort: the user id we need is already captured.
+            await getUpdates(offset, 0);
+          } catch {
+            // Ignore — see above.
+          }
+          return from.id;
+        }
+      }
+    } catch {
+      // A network hiccup during the wait must not crash init with a raw
+      // stack trace — note it (throttled) and keep retrying until deadline.
+      const now = Date.now();
+      if (shouldPrintWaitNote(lastNoteAt, now, noteIntervalMs)) {
+        info("waiting… (network hiccup, retrying)");
+        lastNoteAt = now;
+      }
+      await sleepMs(3000);
     }
   }
   fail("Timed out waiting for a Telegram message.");
@@ -317,6 +415,20 @@ interface WriteConfigArgs {
   detected: Partial<Record<SupportedCli, AgentInfo>>;
   /** Optional NODE_EXTRA_CA_CERTS path for the bot's launchd env. */
   caCert: string | null;
+}
+
+/** Read `allowedUserIds` from an existing config.json, if any. Missing
+ *  file, missing field, or unparsable JSON all read as "no existing
+ *  users" — re-init proceeds as a fresh authorization in that case. */
+export function readExistingAllowedUserIds(home: string): number[] {
+  const configPath = join(home, "config.json");
+  if (!existsSync(configPath)) return [];
+  try {
+    const existing = JSON.parse(readFileSync(configPath, "utf8"));
+    return Array.isArray(existing.allowedUserIds) ? existing.allowedUserIds : [];
+  } catch {
+    return [];
+  }
 }
 
 function writeConfig(home: string, args: WriteConfigArgs): void {

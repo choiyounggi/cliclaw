@@ -113,7 +113,9 @@ That's it. The bot restarts automatically after screen lock or a reboot.
 | `cliclaw start` | Run the bot in the foreground (for testing) |
 | `cliclaw install-launchd` | Install the LaunchAgent (auto-applies `launchd.extraEnv` from config.json) |
 | `cliclaw uninstall-launchd` | Remove the LaunchAgent |
-| `cliclaw doctor` | Check paths, agents, and plist status |
+| `cliclaw upgrade` | Pull the latest npm release and reinstall the LaunchAgent |
+| `cliclaw logs [--audit\|--err]` | Tail a log file (default: `bot.log`; `--audit`: `audit.jsonl`; `--err`: `bot.err`) |
+| `cliclaw doctor` | Live checks: token, launchd, agents, TLS CA |
 | `cliclaw help` | Help |
 
 ## Chat commands (in Telegram)
