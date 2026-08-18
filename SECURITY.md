@@ -56,6 +56,43 @@ cliclaw 는 **단일 신뢰 사용자의 macOS 머신에서 운영**되는 봇�
 - 사진 외 첨부 처리 안 함.
 - macOS only — Linux/Windows 미지원.
 
+## What the confirm gate does NOT protect against
+
+The Telegram confirm gate (`lib/danger-patterns.ts` + `bin/bash-confirm.ts`) is a
+**safety net, not a sandbox**. It exists to catch obviously destructive
+one-liners typed (or generated) while you're away from the keyboard — it does
+not bound what a compromised or misdirected agent can ultimately do.
+
+- **It matches the literal Bash command text against regexes, not executed
+  semantics.** One level of indirection defeats it:
+  - `bash script.sh` — where `script.sh` contains `rm -rf ...` — never
+    surfaces `rm -rf` in the text the gate inspects.
+  - `echo <base64> | base64 -d | sh` — the dangerous command only exists after
+    decoding, at execution time.
+  - Command text assembled at runtime (string concatenation, variable
+    expansion, `eval`) can land in the shell without ever appearing as a
+    literal dangerous pattern.
+- **Treat it as a prompt-injection-adjacent tripwire, not an execution
+  boundary.** A model that is tricked (via prompt injection or otherwise)
+  into using one of the indirections above will not be stopped by this gate.
+- **The layered defenses that actually bound damage** live below the gate,
+  not in it:
+  - Codex's `workspace-write` sandbox (never set `codex.sandbox` to
+    `danger-full-access` — see the recommended-practices list above).
+  - Claude's Read-tool deny rules for sensitive files (`~/.ssh/**`,
+    `~/.aws/**`, `.env*`, etc.) under `safety on`.
+  - Keeping `safety on` so the confirm gate runs at all for the patterns it
+    does catch.
+  - OS-level guards (EDR, `pre-bash-guard` hooks) where present on your
+    machine — the gate's patterns intentionally overlap with these and defer
+    to them when both are active.
+- **Gemini currently bypasses the confirm gate entirely.** Gemini does not
+  integrate with cliclaw's `bash-confirm` IPC, so its own `approvalMode` is
+  the only shell-level defense for Gemini sessions. The `auto_edit` default
+  still prompts for shell/destructive actions inside Gemini itself, but
+  opting into `gemini.approvalMode: "yolo"` removes even that — see item 4
+  in the recommended-practices list above.
+
 ## 검토 이력
 
 | 날짜 | 검토자 | 결과 |
