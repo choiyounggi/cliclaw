@@ -9,13 +9,13 @@
  *   start               — run the bot in the foreground (CLICLAW_HOME-aware)
  *   install-launchd     — write + load LaunchAgent (after manual config edit)
  *   uninstall-launchd   — unload + remove LaunchAgent
- *   doctor              — print agent paths, config path, plist status
+ *   doctor              — live checks: token, launchd, agents, TLS CA
  *   help                — usage
  */
 
 import { resolve, dirname, join } from "node:path";
-import { spawn } from "node:child_process";
-import { homedir } from "node:os";
+import { spawn, execFileSync } from "node:child_process";
+import { homedir, userInfo } from "node:os";
 import { existsSync, readFileSync } from "node:fs";
 
 import * as launchd from "./lib/launchd.ts";
@@ -54,7 +54,7 @@ async function main(): Promise<void> {
       cmdUninstallLaunchd();
       break;
     case "doctor":
-      cmdDoctor();
+      await cmdDoctor();
       break;
     case "upgrade":
       await cmdUpgrade();
@@ -177,20 +177,171 @@ function cmdLogs(args: string[]): void {
   child.on("exit", (code) => process.exit(code ?? 0));
 }
 
-function cmdDoctor(): void {
+type CheckLevel = "ok" | "warn" | "FAIL";
+interface CheckResult { level: CheckLevel; message: string; }
+
+/** Read config.json, returning null on missing file or unparsable JSON —
+ *  every doctor check treats that the same way: skip cleanly, don't FAIL. */
+function readConfigSafe(configPath: string): Record<string, any> | null {
+  if (!existsSync(configPath)) return null;
+  try {
+    return JSON.parse(readFileSync(configPath, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+/** Extract the `pid = <N>` line `launchctl print` emits for a loaded
+ *  service. Null if the service isn't loaded or the line isn't present. */
+export function parseLaunchctlPrintPid(output: string): number | null {
+  const m = output.match(/^\s*"?pid"?\s*=\s*(\d+)/m);
+  return m ? Number(m[1]) : null;
+}
+
+export function describeTokenCheck(
+  hasConfig: boolean,
+  error: unknown,
+  username: string | undefined,
+  classify: (e: unknown) => string,
+  isTokenRejection: (e: unknown) => boolean,
+): CheckResult {
+  if (!hasConfig) {
+    return { level: "warn", message: "no config.json yet — run `cliclaw init` first" };
+  }
+  if (!error) {
+    return { level: "ok", message: `verified (@${username})` };
+  }
+  const hint = isTokenRejection(error)
+    ? ". If it was revoked, generate a new one via @BotFather and re-run `cliclaw init`."
+    : "";
+  return { level: "FAIL", message: `${classify(error)}${hint}` };
+}
+
+export function describeLaunchdCheck(
+  loaded: boolean,
+  pid: number | null,
+  plistExists: boolean,
+): CheckResult {
+  if (loaded) {
+    return { level: "ok", message: pid !== null ? `loaded (pid=${pid})` : "loaded" };
+  }
+  if (plistExists) {
+    return { level: "warn", message: "plist on disk but not loaded — run `cliclaw install-launchd`" };
+  }
+  return { level: "ok", message: "not installed (optional — run `cliclaw install-launchd` to enable auto-start)" };
+}
+
+export function describeAgentCheck(
+  agent: string,
+  path: string | null,
+  version: string | null,
+): CheckResult {
+  if (!path) {
+    return { level: "warn", message: "not found (not installed or not on PATH)" };
+  }
+  if (version === null) {
+    return { level: "FAIL", message: `not executable at ${path} (check permissions / reinstall)` };
+  }
+  return { level: "ok", message: `${version} @ ${path}` };
+}
+
+export function describeTlsCheck(
+  extraCaCertsPath: string | undefined,
+  fileExists: boolean,
+): CheckResult {
+  if (!extraCaCertsPath) {
+    return { level: "ok", message: "no corporate CA configured (not needed unless behind a TLS-intercepting proxy)" };
+  }
+  if (!fileExists) {
+    return {
+      level: "FAIL",
+      message: `configured CA cert missing at ${extraCaCertsPath} — re-run \`cliclaw init\` (Step 4/5)`,
+    };
+  }
+  return { level: "ok", message: `CA cert found at ${extraCaCertsPath}` };
+}
+
+async function cmdDoctor(): Promise<void> {
   console.log(`cliclaw doctor`);
   console.log(`  ROOT (source):    ${ROOT}`);
   console.log(`  HOME (state):     ${HOME}`);
   console.log(`  bot.ts:           ${ENTRY_TS}`);
   console.log(`  bun:              ${BUN_PATH}`);
-  console.log(`  config.json:      ${existsSync(join(HOME, "config.json")) ? "OK" : "missing"}`);
-  console.log(`  agents:`);
-  for (const a of ["claude", "codex", "pi", "gemini"] as const) {
-    const p = resolveCliPath(a);
-    console.log(`    ${a.padEnd(7)} ${p ?? "not found"}`);
+
+  let sawFail = false;
+  const report = (label: string, r: CheckResult): void => {
+    console.log(`  ${r.level}: ${label} — ${r.message}`);
+    if (r.level === "FAIL") sawFail = true;
+  };
+
+  const { getMeSafe, classifyGetMeError, TelegramApiError } = await import("./lib/setup.ts");
+  const config = readConfigSafe(join(HOME, "config.json"));
+
+  // (a) token
+  let tokenError: unknown = null;
+  let username: string | undefined;
+  if (config) {
+    try {
+      const me = await getMeSafe(config.token);
+      username = me.username;
+    } catch (e) {
+      tokenError = e;
+    }
   }
-  const plist = launchd.plistPath();
-  console.log(`  launchd plist:    ${existsSync(plist) ? plist : "not installed"}`);
+  report(
+    "token",
+    describeTokenCheck(
+      !!config,
+      tokenError,
+      username,
+      classifyGetMeError,
+      (e) => e instanceof TelegramApiError,
+    ),
+  );
+
+  // (b) launchd
+  const label = launchd.defaultLabel();
+  const plist = launchd.plistPath(label);
+  let loaded = false;
+  let pid: number | null = null;
+  try {
+    const out = execFileSync("launchctl", ["print", `gui/${userInfo().uid}/${label}`], {
+      encoding: "utf8",
+      timeout: 5000,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    loaded = true;
+    pid = parseLaunchctlPrintPid(out);
+  } catch {
+    loaded = false;
+  }
+  report("launchd", describeLaunchdCheck(loaded, pid, existsSync(plist)));
+
+  // (c) agents — bypass the in-process resolveCliPath cache so doctor
+  // reflects the filesystem/PATH right now, not a stale startup lookup.
+  for (const a of ["claude", "codex", "pi", "gemini"] as const) {
+    const p = resolveCliPath(a, { noCache: true });
+    let version: string | null = null;
+    if (p) {
+      try {
+        const v = execFileSync(p, ["--version"], {
+          encoding: "utf8",
+          timeout: 5000,
+          stdio: ["ignore", "pipe", "ignore"],
+        });
+        version = v.split("\n")[0].trim() || "unknown";
+      } catch {
+        version = null;
+      }
+    }
+    report(a, describeAgentCheck(a, p, version));
+  }
+
+  // (d) TLS
+  const extraCaCertsPath: string | undefined = config?.launchd?.extraEnv?.NODE_EXTRA_CA_CERTS;
+  report("TLS", describeTlsCheck(extraCaCertsPath, extraCaCertsPath ? existsSync(extraCaCertsPath) : false));
+
+  if (sawFail) process.exit(1);
 }
 
 function printUsage(): void {
@@ -204,7 +355,7 @@ Commands:
   upgrade            Pull @latest from npm and reinstall LaunchAgent
   logs [--audit|--err]
                      tail -F a log file (default: bot.log)
-  doctor             Print resolved paths and agent availability
+  doctor             Live checks: token, launchd, agents, TLS CA
   help               This message
 
 Env:
@@ -212,7 +363,11 @@ Env:
 `);
 }
 
-main().catch((e) => {
-  console.error(e instanceof Error ? e.stack ?? e.message : String(e));
-  process.exit(1);
-});
+// Guarded so this module can be imported (e.g. from tests, for its
+// exported pure `describe*` helpers) without running the CLI itself.
+if (import.meta.main) {
+  main().catch((e) => {
+    console.error(e instanceof Error ? e.stack ?? e.message : String(e));
+    process.exit(1);
+  });
+}
