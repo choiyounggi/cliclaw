@@ -56,6 +56,8 @@ cliclaw init
 ```
 Welcome to cliclaw setup.
 
+Bot language for Telegram chat UX — en/ko [en]: ko
+
 Step 1/5 — Telegram bot token
   Get one from @BotFather (/newbot) on Telegram.
   Bot token: 1234:ABC...
@@ -129,11 +131,13 @@ All set.
 
 ```
 ~/.cliclaw/
-├── config.json              # 600 권한, 토큰·화이트리스트·launchd extraEnv
+├── config.json              # 600 권한, 토큰·화이트리스트·locale·launchd extraEnv
+├── bot.pid                  # 단일 인스턴스 락 (보유 프로세스 PID)
 ├── safety.json              # /safety on|off 영속 상태
-├── sessions.json            # 채팅별 active agent 메타
-├── sessions/                # 채팅별 codex / pi / gemini 디렉토리
-├── workspace/               # 에이전트 공통 cwd (샌드박스)
+├── sessions.json            # 채팅별 active agent 메타, 모델 오버라이드, plan 모드
+├── sessions/                # 채팅별 claude / codex / pi / gemini 상태
+│   └── claude/<chatId>/     # Claude의 채팅별 cwd (+ 자체 .claude/settings.json)
+├── workspace/               # codex / pi 공용 cwd (샌드박스)
 │   ├── .claude/settings.json # 위험 명령 hook + 안전모드 ON 시 deny 룰
 │   └── uploads/<chatId>/    # 텔레그램 사진 다운로드
 ├── logs/
@@ -170,16 +174,16 @@ CLICLAW_HOME=~/my-bot cliclaw init
 상태는 `$CLICLAW_HOME/safety.json` 에 영속화되어 재시작 후에도 유지.
 
 ### 3. 응답 스트리밍 (Claude)
-`--include-partial-messages` 의 `text_delta` 를 받아 `editMessageText` 로 실시간 갱신. 1.5초 디바운스. 3800자 넘으면 새 메시지로 롤오버.
+`--include-partial-messages` 의 `text_delta` 를 받아 `editMessageText` 로 실시간 갱신. 1.5초 디바운스. 롤오버 기준은 변환된 HTML 길이로 계산하고, 스트리밍 중 미완성 코드블록도 올바르게 렌더링하며, 영구 전송 실패 구간은 조용히 사라지는 대신 plain text 로 폴백 전송됩니다.
 
 ### 4. 이미지 첨부 처리
 텔레그램의 사진/이미지 문서를 자동으로 `workspace/uploads/<chatId>/<msgId>.<ext>` 로 다운로드 후 경로를 프롬프트 앞에 추가.
 
 ### 5. headless 권한 정책
-- **Claude**: `--permission-mode bypassPermissions` 로 실행 — Bash 위험 명령은 confirm 게이트가 잡고, 민감 파일은 안전모드의 deny 룰이 거부.
+- **Claude**: `--permission-mode bypassPermissions` 로 실행 — Bash 위험 명령은 confirm 게이트가 잡고, 민감 파일은 안전모드의 deny 룰이 거부. `/plan on` 으로 `--permission-mode plan`(수정 없이 제안만) 전환 가능.
 - **Codex**: `sandbox=workspace-write` 기본. `danger-full-access` 사용 금지.
 - **Pi**: 기본 모드.
-- **Gemini**: `approvalMode=auto_edit` 기본 (edit 자동, 파괴적 명령은 prompt). 더 자율적 `yolo`, 더 보수적 `default`/`plan` 가능.
+- **Gemini**: `approvalMode=auto_edit` 기본 (edit 자동, 파괴적 명령은 prompt). 더 자율적 `yolo`, 더 보수적 `default`/`plan` 가능. 단, Gemini 는 cliclaw confirm 게이트와 미통합 — 자체 `approvalMode` 가 유일한 셸 방어선입니다 (SECURITY.md 참조).
 
 ### 6. 회사망 TLS 인터셉터 자동 감지
 Zscaler / Forticlient / Cisco Umbrella 등이 HTTPS 를 가로채는 환경이면 Node 가 Telegram 인증서를 신뢰 못 해 봇이 동작 못합니다.
@@ -194,8 +198,15 @@ Zscaler / Forticlient / Cisco Umbrella 등이 HTTPS 를 가로채는 환경이�
 
 Time Machine 백업 / EDR / 어깨 너머 노출 모두 방어.
 
-### 8. 한국어 UI
-모든 사용자 메시지·에러·`/help` 가 한국어.
+### 8. 다국어 UI (en/ko)
+모든 사용자 메시지·에러·`/help`·confirm 버튼(`✅ Allow / ❌ Deny`)이 타입 기반 en/ko 메시지 테이블에서 제공됩니다. `config.locale` 로 선택 — 신규 설치는 영어 기본, 1.0 이전 config 는 자동으로 한국어 유지.
+
+### 9. 무인 운영을 위한 설계
+- **단일 인스턴스 락** (`bot.pid`) — `cliclaw start` 를 중복 실행해도 폴링 충돌·confirm 소켓 하이재킹이 발생하지 않음.
+- **크래시 루프 없음** — 설정이 깨져도 launchd 아래에서 핫루프 대신 60초 휴면 재시도.
+- **우아한 종료** — 재시작 시 진행 중 작업을 취소하고 해당 채팅에 통지.
+- **프로세스 그룹 종료** — `/stop`·타임아웃 시 에이전트가 띄운 손자 프로세스(MCP 서버, git 등)까지 함께 종료.
+- **보존 기간 청소** — 오래된 `uploads/`·`sessions/` 디렉토리 자동 정리 (`sessionRetentionDays`, 기본 30일).
 
 ## launchd 동작 상세
 
@@ -255,6 +266,7 @@ bun run test
 - 사용자 응답 시간 동안 hook이 IPC를 잡고 대기.
 - 음성/파일 첨부 X (사진만).
 - 동일 채팅 내 동시 메시지는 거부 (`/stop` 또는 종료 대기).
+- 1:1 채팅 전용 — 그룹/슈퍼그룹/채널은 정중히 거부.
 - macOS only.
 
 ## 변경 이력

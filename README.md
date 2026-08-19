@@ -32,8 +32,9 @@ auto-detection of corporate TLS interceptors (Zscaler, etc.).
 > Install **only the CLIs you want** — missing agents are automatically dropped
 > from the active list.
 
-> The chat UX (user messages, errors, `/help`) is currently Korean-first; the
-> bot itself works fine either way.
+> The chat UX (messages, `/help`, confirm buttons) is localized — English by
+> default on new installs, Korean available via `"locale": "ko"` in
+> config.json (existing pre-1.0 configs keep Korean automatically).
 
 ## Quick start (3 minutes)
 
@@ -70,6 +71,8 @@ Five steps, guided:
 
 ```
 Welcome to cliclaw setup.
+
+Bot language for Telegram chat UX — en/ko [en]: en
 
 Step 1/5 — Telegram bot token
   Get one from @BotFather (/newbot) on Telegram.
@@ -145,11 +148,13 @@ All state is isolated under `~/.cliclaw/`:
 
 ```
 ~/.cliclaw/
-├── config.json              # mode 600; token, allowlist, launchd extraEnv
+├── config.json              # mode 600; token, allowlist, locale, launchd extraEnv
+├── bot.pid                  # single-instance lock (holder PID)
 ├── safety.json              # persisted /safety on|off state
-├── sessions.json            # per-chat active-agent metadata
-├── sessions/                # per-chat codex / pi / gemini directories
-├── workspace/               # the agents' shared cwd (sandbox)
+├── sessions.json            # per-chat active-agent metadata, model overrides, plan mode
+├── sessions/                # per-chat claude / codex / pi / gemini state
+│   └── claude/<chatId>/     # Claude's per-chat cwd (+ its own .claude/settings.json)
+├── workspace/               # shared cwd for codex / pi (sandbox)
 │   ├── .claude/settings.json # dangerous-command hook + deny rules when safety is ON
 │   └── uploads/<chatId>/    # Telegram photo downloads
 ├── logs/
@@ -190,17 +195,20 @@ The state persists in `$CLICLAW_HOME/safety.json` across restarts.
 
 ### 3. Response streaming (Claude)
 Consumes `text_delta` from `--include-partial-messages` and live-updates via
-`editMessageText`, debounced at 1.5s. Past 3800 chars it rolls over to a new message.
+`editMessageText`, debounced at 1.5s. Rollover to a new message is budgeted
+against the converted HTML length (not raw text), unfinished code fences render
+correctly mid-stream, and a segment that permanently fails to send falls back
+to plain text instead of silently disappearing.
 
 ### 4. Image attachments
 Telegram photos/image documents are downloaded to
 `workspace/uploads/<chatId>/<msgId>.<ext>` and the path is prepended to the prompt.
 
 ### 5. Headless permission policy
-- **Claude**: runs with `--permission-mode bypassPermissions` — dangerous Bash is caught by the confirm gate, and sensitive files by safety-mode deny rules.
+- **Claude**: runs with `--permission-mode bypassPermissions` — dangerous Bash is caught by the confirm gate, and sensitive files by safety-mode deny rules. `/plan on` switches to `--permission-mode plan` (propose, don't edit).
 - **Codex**: `sandbox=workspace-write` by default. Never use `danger-full-access`.
 - **Pi**: default mode.
-- **Gemini**: `approvalMode=auto_edit` by default (edits auto-approved, destructive commands prompt). More autonomous `yolo` or more conservative `default`/`plan` available.
+- **Gemini**: `approvalMode=auto_edit` by default (edits auto-approved, destructive commands prompt). More autonomous `yolo` or more conservative `default`/`plan` available. Note: Gemini does not integrate with cliclaw's confirm gate — its own `approvalMode` is the only shell-level defense (see SECURITY.md).
 
 ### 6. Corporate TLS interceptor auto-detection
 Where Zscaler / Forticlient / Cisco Umbrella intercepts HTTPS, Node cannot
@@ -218,8 +226,23 @@ Everything written to `logs/bot.log` / `bot.err` is pre-redacted:
 
 Defends against Time Machine backups, EDR, and shoulder surfing alike.
 
-### 8. Korean UI
-All user-facing messages, errors, and `/help` are in Korean (English copy PRs welcome).
+### 8. Localized UI (en/ko)
+Every user-facing string — messages, errors, `/help`, and the confirm-gate
+buttons (`✅ Allow / ❌ Deny`) — comes from a typed en/ko message table.
+`config.locale` selects the language: new installs default to English, and
+configs written before 1.0 keep Korean automatically.
+
+### 9. Built to run unattended
+- **Single-instance lock** (`bot.pid`) — a second `cliclaw start` can't race
+  Telegram polling or hijack the confirm-gate socket.
+- **No crash loops** — a broken config makes the daemon go dormant and retry
+  every 60s instead of hot-looping under launchd.
+- **Graceful shutdown** — in-flight jobs are cancelled and their chats
+  notified before exit.
+- **Process-group kill** — `/stop` and timeouts also terminate the agent's
+  grandchildren (MCP servers, git, …), not just the CLI itself.
+- **Retention sweeps** — stale `uploads/` and `sessions/` directories are
+  cleaned up automatically (`sessionRetentionDays`, default 30).
 
 ## launchd details
 
@@ -279,6 +302,7 @@ bun run test
 - The hook holds the IPC while waiting for the user's decision.
 - No voice/file attachments (photos only).
 - Concurrent messages in the same chat are rejected (`/stop` or wait).
+- 1:1 chats only — group/supergroup/channel chats are politely rejected.
 - macOS only.
 
 ## Changelog
