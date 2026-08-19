@@ -119,6 +119,20 @@ export interface Messages {
   safetyOffNotice: string;
   safetyUsage: string;
 
+  // ---------- model override (per-chat, per-agent) ----------
+  modelShow(agent: string, effectiveModel: string): string;
+  modelSet(agent: string, model: string): string;
+  modelCleared(agent: string): string;
+  /** Shown as the effective model when no override and no config default are set (the CLI's own default applies). */
+  modelDefaultLabel: string;
+
+  // ---------- plan mode (Claude-only toggle) ----------
+  planShow(state: "ON" | "OFF"): string;
+  planOnNotice: string;
+  planOffNotice: string;
+  planClaudeOnly: string;
+  planUsage: string;
+
   // ---------- confirm gate ----------
   confirmMessageText(req: ConfirmMessageParams): string;
   confirmOutcomeText(decision: "allow" | "deny", reason?: string): string;
@@ -144,6 +158,8 @@ export interface Messages {
   commandDescHealth: string;
   commandDescStop: string;
   commandDescSafety: string;
+  commandDescModel: string;
+  commandDescPlan: string;
   commandDescHelp: string;
 }
 
@@ -185,6 +201,9 @@ const KO: Messages = {
       "  /health     — 봇 헬스 (가동시간, 메모리, 로그 크기)",
       "  /stop       — 진행 중 작업 취소",
       "  /safety     — 안전모드 상태 (/safety on · off로 토글)",
+      "  /model      — 모델 오버라이드 표시/설정 (/model <이름> · /model default로 해제)",
+      "  /plan       — Claude 플랜 모드 토글 (/plan on · off, Claude 전용)",
+      "  //<cmd>     — 활성 에이전트에 네이티브 슬래시 명령을 그대로 전달 (예: //compact, 지원 여부는 각 CLI에 달림)",
       "  /help       — 이 도움말",
       "",
       `작업 디렉토리: ${p.cwd}`,
@@ -288,6 +307,18 @@ const KO: Messages = {
     "본인 환경의 외부 가드(pre-bash-guard, EDR 등)가 위험 명령을 차단하는지 확인하세요.",
   safetyUsage: "사용: /safety · /safety on · /safety off",
 
+  modelShow: (agent, effectiveModel) =>
+    `🧠 [${agent}] 모델: ${effectiveModel}\n\n사용: /model <이름> · /model default 로 오버라이드 해제`,
+  modelSet: (agent, model) => `🧠 [${agent}] 모델 오버라이드 설정: ${model}`,
+  modelCleared: (agent) => `🧠 [${agent}] 모델 오버라이드 해제 — config 기본값을 사용합니다.`,
+  modelDefaultLabel: "(CLI 기본값)",
+
+  planShow: (state) => `📝 플랜 모드: ${state}\n\n사용: /plan on · /plan off`,
+  planOnNotice: "📝 플랜 모드 ON. Claude가 직접 수정하지 않고 변경 계획만 제안합니다 (--permission-mode plan).",
+  planOffNotice: "📝 플랜 모드 OFF. Claude가 다시 정상적으로 수정합니다.",
+  planClaudeOnly: "📝 플랜 모드는 Claude 에만 적용됩니다. 설정은 저장되었으며 /claude 로 전환하면 적용됩니다.",
+  planUsage: "사용: /plan · /plan on · /plan off",
+
   confirmMessageText: (req) => {
     const truncated = req.command.length > 800 ? req.command.slice(0, 800) + "…" : req.command;
     return [
@@ -326,6 +357,8 @@ const KO: Messages = {
   commandDescHealth: "봇 헬스 (가동시간/메모리)",
   commandDescStop: "진행 중 작업 취소",
   commandDescSafety: "안전모드 상태/토글",
+  commandDescModel: "모델 오버라이드 표시/설정",
+  commandDescPlan: "Claude 플랜 모드 토글",
   commandDescHelp: "도움말",
 };
 
@@ -356,6 +389,9 @@ const EN: Messages = {
       "  /health     — bot health (uptime, memory, log size)",
       "  /stop       — cancel the in-progress job",
       "  /safety     — safety mode status (toggle with /safety on · off)",
+      "  /model      — show/set the model override (/model <name> · /model default to clear)",
+      "  /plan       — Claude plan-mode toggle (/plan on · off, Claude-only)",
+      "  //<cmd>     — send <cmd> verbatim as a native slash command to the active agent (e.g. //compact; support depends on the CLI)",
       "  /help       — this help",
       "",
       `Working directory: ${p.cwd}`,
@@ -459,6 +495,18 @@ const EN: Messages = {
     "Make sure your own environment's external guards (pre-bash-guard, EDR, etc.) catch dangerous commands.",
   safetyUsage: "Usage: /safety · /safety on · /safety off",
 
+  modelShow: (agent, effectiveModel) =>
+    `🧠 [${agent}] model: ${effectiveModel}\n\nUsage: /model <name> · /model default to clear the override`,
+  modelSet: (agent, model) => `🧠 [${agent}] model override set to: ${model}`,
+  modelCleared: (agent) => `🧠 [${agent}] model override cleared — using the config default.`,
+  modelDefaultLabel: "(the CLI's own default)",
+
+  planShow: (state) => `📝 Plan mode: ${state}\n\nUsage: /plan on · /plan off`,
+  planOnNotice: "📝 Plan mode ON. Claude will propose changes instead of editing them (--permission-mode plan).",
+  planOffNotice: "📝 Plan mode OFF. Claude edits normally again.",
+  planClaudeOnly: "📝 Plan mode only applies to Claude. Saved — it takes effect when you switch back to /claude.",
+  planUsage: "Usage: /plan · /plan on · /plan off",
+
   confirmMessageText: (req) => {
     const truncated = req.command.length > 800 ? req.command.slice(0, 800) + "…" : req.command;
     return [
@@ -497,6 +545,8 @@ const EN: Messages = {
   commandDescHealth: "Bot health (uptime/memory)",
   commandDescStop: "Cancel the in-progress job",
   commandDescSafety: "Safety mode status/toggle",
+  commandDescModel: "Show/set the model override",
+  commandDescPlan: "Claude plan-mode toggle",
   commandDescHelp: "Help",
 };
 

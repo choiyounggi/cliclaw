@@ -129,6 +129,9 @@ That's it. The bot restarts automatically after screen lock or a reboot.
 | `/reset` | Discard only the current active agent's session |
 | `/reset all` | Discard every agent session in this chat |
 | `/safety` | Show safety-mode status — toggle with `/safety on` / `/safety off` |
+| `/model` | Show/set this chat's per-agent model override — `/model <name>` to set, `/model default` to clear |
+| `/plan` | Claude-only plan-mode toggle — `/plan on` spawns Claude with `--permission-mode plan` (propose, don't edit); `/plan off` reverts |
+| `//<cmd>` | Native slash-command passthrough — strips one leading `/` and sends `<cmd>` verbatim as the prompt (e.g. `//compact`); whether the underlying CLI honors it in headless mode is up to that CLI |
 | `/start` `/help` | Help |
 | Any other text / photo | Sent as a prompt to the active agent (photos are downloaded and their path is prepended to the prompt) |
 

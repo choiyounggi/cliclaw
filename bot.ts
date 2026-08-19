@@ -22,7 +22,10 @@ import { execFileSync } from "node:child_process";
 
 import { JobRegistry, type Job } from "./lib/job-registry.ts";
 import { acquireInstanceLock, releaseInstanceLock } from "./lib/instance-lock.ts";
-import { isNonPrivateChat, ConfigFatalError, isConfigFatalError } from "./lib/chat-policy.ts";
+import {
+  isNonPrivateChat, ConfigFatalError, isConfigFatalError,
+  parseModelCommand, parsePlanCommand, isPassthrough, passthroughPrompt,
+} from "./lib/chat-policy.ts";
 import { createAuditWriter, type AuditWriter } from "./lib/audit-log.ts";
 import { runSubprocessStream } from "./lib/subprocess-stream.ts";
 import { parseClaudeStreamLine, parseGeminiStreamLine, detectProgressLine, stripAnsi } from "./lib/stream-parser.ts";
@@ -149,6 +152,12 @@ interface AgentSession {
 interface ChatState {
   active: Agent;
   agents: Partial<Record<Agent, AgentSession>>;
+  /** Per-chat, per-agent model override (D1). Absent -> config default. */
+  modelOverride?: Partial<Record<Agent, string>>;
+  /** Claude-only plan-mode toggle (D2): spawns with --permission-mode plan
+   *  instead of bypassPermissions. Stored even while a non-claude agent is
+   *  active, so it takes effect on switching back. */
+  planMode?: boolean;
 }
 
 interface AgentResult {
@@ -466,6 +475,15 @@ function getChat(store: SessionStore, chatId: number): ChatState {
   }
   return store[key];
 }
+/** The model actually used to spawn `agent` for this chat: the per-chat
+ *  override (D1) if set, else the config default (which is `null` for
+ *  codex/pi/gemini when the CLI's own default should apply). */
+function effectiveModel(chat: ChatState, agent: Agent): string | null {
+  const override = chat.modelOverride?.[agent];
+  if (override) return override;
+  return config.agents[agent].model ?? null;
+}
+
 function getOrInitAgentSession(chat: ChatState, agent: Agent): AgentSession {
   if (!chat.agents[agent]) {
     chat.agents[agent] = {
@@ -747,6 +765,8 @@ async function runClaude(
   abort: AbortSignal,
   onProgress: (text: string) => void,
   stream: StreamingMessage | null,
+  model: string,
+  planMode: boolean,
 ): Promise<AgentResult> {
   const c = config.agents.claude;
   // Per-chat cwd so concurrent chats don't share Claude's --continue session
@@ -766,8 +786,8 @@ async function runClaude(
     "-p", prompt,
     "--output-format", "stream-json",
     "--verbose",
-    "--model", c.model,
-    "--permission-mode", "bypassPermissions",
+    "--model", model,
+    "--permission-mode", planMode ? "plan" : "bypassPermissions",
   ];
   if (stream && claudePartialMessages) args.push("--include-partial-messages");
   // --continue resumes the most-recent session in cwd. More robust than
@@ -776,7 +796,7 @@ async function runClaude(
   const isContinuation = !!(session && session.turnCount > 0);
   if (isContinuation) args.push("--continue");
 
-  log("debug", `claude args: --model ${c.model} ${isContinuation ? "--continue" : "(new)"} stream=${!!stream}`);
+  log("debug", `claude args: --model ${model} plan=${planMode} ${isContinuation ? "--continue" : "(new)"} stream=${!!stream}`);
 
   let sessionId: string | null = null;
   let resultText = "";
@@ -949,6 +969,7 @@ async function runCodex(
   session: AgentSession | undefined,
   abort: AbortSignal,
   onProgress: (text: string) => void,
+  model: string | null,
 ): Promise<AgentResult> {
   const c = config.agents.codex;
   const codexHome = agentSessionDir("codex", chatId);
@@ -959,13 +980,13 @@ async function runCodex(
   const args: string[] = ["exec"];
   if (isResume) {
     args.push("resume", "--last");
-    if (c.model) args.push("-m", c.model);
+    if (model) args.push("-m", model);
     args.push("--skip-git-repo-check");
     args.push("-o", outFile);
     args.push(prompt);
   } else {
     args.push("-s", c.sandbox);
-    if (c.model) args.push("-m", c.model);
+    if (model) args.push("-m", model);
     args.push("--skip-git-repo-check");
     args.push("--color", "never");
     args.push("-o", outFile);
@@ -1015,6 +1036,7 @@ async function runPi(
   session: AgentSession | undefined,
   abort: AbortSignal,
   onProgress: (text: string) => void,
+  model: string | null,
 ): Promise<AgentResult> {
   const c = config.agents.pi;
   const sessionDir = agentSessionDir("pi", chatId);
@@ -1024,7 +1046,7 @@ async function runPi(
     "--session-dir", sessionDir,
   ];
   if (c.provider) args.push("--provider", c.provider);
-  if (c.model) args.push("--model", c.model);
+  if (model) args.push("--model", model);
   if (session && session.turnCount > 0) args.push("--continue");
   args.push(prompt);
 
@@ -1067,6 +1089,7 @@ async function runGemini(
   abort: AbortSignal,
   onProgress: (text: string) => void,
   stream: StreamingMessage | null,
+  model: string | null,
 ): Promise<AgentResult> {
   const c = config.agents.gemini;
   // Per-chat cwd so each chat has its own `~/.gemini/<project>/sessions/`
@@ -1089,10 +1112,10 @@ async function runGemini(
     "--approval-mode", approval,
     "-o", useStreamJson ? "stream-json" : "text",
   ];
-  if (c.model) args.push("-m", c.model);
+  if (model) args.push("-m", model);
   if (session && session.turnCount > 0) args.push("-r", "latest");
 
-  log("debug", `gemini args: --approval-mode ${approval} ${session && session.turnCount > 0 ? "-r latest" : "(new)"} model=${c.model ?? "default"} stream=${useStreamJson}`);
+  log("debug", `gemini args: --approval-mode ${approval} ${session && session.turnCount > 0 ? "-r latest" : "(new)"} model=${model ?? "default"} stream=${useStreamJson}`);
 
   // Buffer the assistant text deltas; we keep them so the final
   // returned text matches what the user already saw streamed.
@@ -1148,11 +1171,13 @@ async function runAgent(
   abort: AbortSignal,
   onProgress: (text: string) => void,
   stream: StreamingMessage | null,
+  chat: ChatState,
 ): Promise<AgentResult> {
-  if (agent === "claude") return runClaude(prompt, session, chatId, abort, onProgress, stream);
-  if (agent === "codex")  return runCodex(prompt, chatId, session, abort, onProgress);
-  if (agent === "pi")     return runPi(prompt, chatId, session, abort, onProgress);
-  if (agent === "gemini") return runGemini(prompt, chatId, session, abort, onProgress, stream);
+  const model = effectiveModel(chat, agent);
+  if (agent === "claude") return runClaude(prompt, session, chatId, abort, onProgress, stream, model ?? config.agents.claude.model, !!chat.planMode);
+  if (agent === "codex")  return runCodex(prompt, chatId, session, abort, onProgress, model);
+  if (agent === "pi")     return runPi(prompt, chatId, session, abort, onProgress, model);
+  if (agent === "gemini") return runGemini(prompt, chatId, session, abort, onProgress, stream, model);
   throw new Error(`unknown agent: ${agent}`);
 }
 
@@ -1264,6 +1289,46 @@ async function handleSafetyCommand(chatId: number, arg: string): Promise<void> {
     return;
   }
   await sendMessage(chatId, M.safetyUsage);
+}
+
+async function handleModelCommand(chatId: number, chat: ChatState, text: string): Promise<void> {
+  const parsed = parseModelCommand(text);
+  const agent = chat.active;
+  if (parsed.kind === "show") {
+    const eff = effectiveModel(chat, agent) ?? M.modelDefaultLabel;
+    await sendMessage(chatId, M.modelShow(agent, eff));
+    return;
+  }
+  if (parsed.kind === "clear") {
+    if (chat.modelOverride) delete chat.modelOverride[agent];
+    saveStore(store);
+    await sendMessage(chatId, M.modelCleared(agent));
+    return;
+  }
+  if (!chat.modelOverride) chat.modelOverride = {};
+  chat.modelOverride[agent] = parsed.model;
+  saveStore(store);
+  await sendMessage(chatId, M.modelSet(agent, parsed.model));
+}
+
+async function handlePlanCommand(chatId: number, chat: ChatState, text: string): Promise<void> {
+  const parsed = parsePlanCommand(text);
+  if (parsed === null) {
+    await sendMessage(chatId, M.planUsage);
+    return;
+  }
+  if (parsed === "show") {
+    await sendMessage(chatId, M.planShow(chat.planMode ? "ON" : "OFF"));
+    return;
+  }
+  const turningOn = parsed === "on";
+  chat.planMode = turningOn;
+  saveStore(store);
+  if (chat.active !== "claude") {
+    await sendMessage(chatId, M.planClaudeOnly);
+    return;
+  }
+  await sendMessage(chatId, turningOn ? M.planOnNotice : M.planOffNotice);
 }
 
 function helpText(active: Agent): string {
@@ -1489,6 +1554,18 @@ async function handleMessage(msg: TgMessage): Promise<void> {
     return;
   }
 
+  if (text === "/model" || text.startsWith("/model ")) {
+    audit.write({ chatId, userId, type: "cmd", data: { cmd: "model", arg: text.slice(6).trim() } });
+    await handleModelCommand(chatId, chat, text);
+    return;
+  }
+
+  if (text === "/plan" || text.startsWith("/plan ")) {
+    audit.write({ chatId, userId, type: "cmd", data: { cmd: "plan", arg: text.slice(5).trim() } });
+    await handlePlanCommand(chatId, chat, text);
+    return;
+  }
+
   if (text === "/status") {
     audit.write({ chatId, userId, type: "cmd", data: { cmd: "status" } });
     await sendMessage(chatId, statusText(chat, chatId));
@@ -1535,7 +1612,14 @@ async function handleMessage(msg: TgMessage): Promise<void> {
     text = `${text}${M.imageAttachmentNote(refs)}`;
   }
 
-  if (!text || text.startsWith("/")) {
+  if (isPassthrough(text)) {
+    // Native slash-command passthrough (D3): strip one leading slash and
+    // send the remainder verbatim as a prompt through the normal job
+    // pipeline. Must run BEFORE the unknown-command rejection below since
+    // the resulting prompt itself starts with "/" (e.g. "//compact" -> "/compact").
+    audit.write({ chatId, userId, type: "cmd", data: { cmd: "passthrough", raw: text.slice(0, 200) } });
+    text = passthroughPrompt(text);
+  } else if (!text || text.startsWith("/")) {
     if (text.startsWith("/")) await sendMessage(chatId, M.unknownCommand(text, helpText(chat.active)));
     return;
   }
@@ -1606,7 +1690,7 @@ async function handleMessage(msg: TgMessage): Promise<void> {
     : null;
 
   try {
-    let result = await runAgent(agent, text, chatId, sessionBefore, job.abort.signal, onProgress, stream);
+    let result = await runAgent(agent, text, chatId, sessionBefore, job.abort.signal, onProgress, stream, chat);
 
     // --continue can fail if the cwd has no prior session OR if Claude can't
     // locate one. In that case, retry once as a fresh conversation.
@@ -1619,7 +1703,7 @@ async function handleMessage(msg: TgMessage): Promise<void> {
     ) {
       log("info", `claude --continue failed for chat=${chatId}, retrying fresh`);
       delete chat.agents.claude;
-      result = await runClaude(text, undefined, chatId, job.abort.signal, onProgress, stream);
+      result = await runClaude(text, undefined, chatId, job.abort.signal, onProgress, stream, effectiveModel(chat, "claude") ?? config.agents.claude.model, !!chat.planMode);
     }
 
     if (!result.error) {
@@ -1715,6 +1799,8 @@ async function pollLoop(): Promise<void> {
         { command: "health", description: M.commandDescHealth },
         { command: "stop", description: M.commandDescStop },
         { command: "safety", description: M.commandDescSafety },
+        { command: "model", description: M.commandDescModel },
+        { command: "plan", description: M.commandDescPlan },
         { command: "help", description: M.commandDescHelp },
       ],
     });

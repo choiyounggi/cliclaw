@@ -114,6 +114,9 @@ All set.
 | `/reset` | 현재 active 에이전트 세션만 폐기 |
 | `/reset all` | 이 채팅의 모든 에이전트 세션 폐기 |
 | `/safety` | 안전모드 상태 확인 — `/safety on` 또는 `/safety off` 로 토글 |
+| `/model` | 이 채팅의 에이전트별 모델 오버라이드 표시/설정 — `/model <이름>` 으로 설정, `/model default` 로 해제 |
+| `/plan` | Claude 전용 플랜 모드 토글 — `/plan on` 시 Claude를 `--permission-mode plan` 으로 실행 (직접 수정 대신 계획만 제안); `/plan off` 로 원복 |
+| `//<cmd>` | 네이티브 슬래시 명령 전달 — 앞의 `/` 하나만 제거하고 `<cmd>` 를 그대로 프롬프트로 전송 (예: `//compact`); 헤드리스 모드에서 실제로 동작할지는 각 CLI에 달려 있음 |
 | `/start` `/help` | 도움말 |
 | 그 외 텍스트 / 사진 | active 에이전트에 프롬프트 전달 (사진은 자동 다운로드 후 경로가 프롬프트 앞에 주입됨) |
 

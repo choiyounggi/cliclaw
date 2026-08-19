@@ -27,3 +27,51 @@ export class ConfigFatalError extends Error {}
 export function isConfigFatalError(err: unknown): boolean {
   return err instanceof ConfigFatalError;
 }
+
+export type ModelCommand =
+  | { kind: "show" }
+  | { kind: "set"; model: string }
+  | { kind: "clear" };
+
+/**
+ * Parse a `/model` command (input already confirmed to start with "/model").
+ * No argument -> show the active agent's effective model. `default` (any
+ * case) -> clear the override. Anything else is taken verbatim as the model
+ * name to set — deliberately unvalidated: model names change too fast to
+ * pin to a list the repo doesn't own, so a bad name surfaces naturally when
+ * the underlying CLI errors on its next run.
+ */
+export function parseModelCommand(text: string): ModelCommand {
+  const rest = text.slice("/model".length).trim();
+  if (rest === "") return { kind: "show" };
+  if (rest.toLowerCase() === "default") return { kind: "clear" };
+  return { kind: "set", model: rest };
+}
+
+/**
+ * Parse a `/plan` command (input already confirmed to start with "/plan").
+ * No argument -> show current state. "on"/"off" (any case) -> toggle.
+ * Anything else -> null (caller replies with usage).
+ */
+export function parsePlanCommand(text: string): "show" | "on" | "off" | null {
+  const rest = text.slice("/plan".length).trim().toLowerCase();
+  if (rest === "") return "show";
+  if (rest === "on") return "on";
+  if (rest === "off") return "off";
+  return null;
+}
+
+/**
+ * True iff `text` is a `//`-prefixed native slash-command passthrough with
+ * a non-empty remainder. `//` alone (nothing after the two slashes) is NOT
+ * a passthrough — it falls through to the normal unknown-command path.
+ */
+export function isPassthrough(text: string): boolean {
+  return text.startsWith("//") && text.slice(2).trim().length > 0;
+}
+
+/** Strip exactly one leading slash from a passthrough message, so `//compact`
+ *  becomes the verbatim prompt `/compact` sent to the active agent. */
+export function passthroughPrompt(text: string): string {
+  return text.slice(1);
+}
