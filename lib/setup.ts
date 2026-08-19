@@ -38,6 +38,8 @@ export async function runInit(opts: SetupOptions): Promise<void> {
     info(`State directory: ${opts.home}`);
     info(`Bot source: ${opts.entryTs}`);
 
+    const locale = await promptLocale(rl);
+
     // ── Step 1: Telegram token ────────────────────────────────────────
     section("Step 1/5 — Telegram bot token");
     info("Get one from @BotFather (/newbot) on Telegram.");
@@ -87,10 +89,10 @@ export async function runInit(opts: SetupOptions): Promise<void> {
     }
 
     // ── Step 4: Corporate TLS CA (optional) ───────────────────────────
-    section("Step 4/5 — Corporate TLS interceptor (선택)");
-    info("회사망에서 Zscaler / Forticlient / Cisco Umbrella 등이 HTTPS 를 가로채면");
-    info("Node 가 Telegram 인증서를 신뢰하지 못해 봇이 메시지를 받을 수 없습니다.");
-    info("해당 환경이면 CA 인증서(.pem) 경로를 알려주세요 — 봇 LaunchAgent 에만 적용됩니다.");
+    section("Step 4/5 — Corporate TLS interceptor (optional)");
+    info("If your network's Zscaler / Forticlient / Cisco Umbrella (or similar) intercepts HTTPS,");
+    info("Node won't trust Telegram's certificate and the bot won't be able to receive messages.");
+    info("If that's your environment, provide the CA certificate (.pem) path — applied only to the bot's LaunchAgent.");
     const caCert = await detectCaCert(rl);
 
     // ── Write config.json ─────────────────────────────────────────────
@@ -100,6 +102,7 @@ export async function runInit(opts: SetupOptions): Promise<void> {
       defaultAgent,
       detected,
       caCert,
+      locale,
     });
     ok(`Wrote ${join(opts.home, "config.json")} (chmod 600)`);
 
@@ -140,6 +143,12 @@ export async function runInit(opts: SetupOptions): Promise<void> {
 // ─────────────────────────────────────────────────────────────────────
 // Prompts
 // ─────────────────────────────────────────────────────────────────────
+
+/** Bot language for Telegram chat UX. Retry-free: anything other than "ko" is "en". */
+async function promptLocale(rl: ReturnType<typeof createInterface>): Promise<string> {
+  const ans = (await rl.question("Bot language for Telegram chat UX — en/ko [en]: ")).trim().toLowerCase();
+  return ans === "ko" ? "ko" : "en";
+}
 
 async function promptToken(rl: ReturnType<typeof createInterface>): Promise<string> {
   for (let i = 0; i < 3; i++) {
@@ -208,28 +217,28 @@ async function detectCaCert(
 
   for (const c of candidates) {
     if (/[<>]/.test(c.value)) {
-      warn(`${c.source}: 잘못된 placeholder가 포함된 경로라 건너뜁니다 (${c.value})`);
+      warn(`${c.source}: skipping — path contains an unresolved placeholder (${c.value})`);
       continue;
     }
     if (!existsSync(c.value)) {
-      warn(`${c.source}: 파일이 존재하지 않아 건너뜁니다 (${c.value})`);
+      warn(`${c.source}: skipping — file does not exist (${c.value})`);
       continue;
     }
     info(`${c.source}: ${c.value}`);
-    if (await yesNo(rl, "이 CA 인증서를 봇의 LaunchAgent 환경에 적용할까요?", true)) {
+    if (await yesNo(rl, "Apply this CA certificate to the bot's LaunchAgent environment?", true)) {
       return c.value;
     }
     return null;
   }
 
-  const manual = (await rl.question("CA 경로 (없으면 Enter): ")).trim();
+  const manual = (await rl.question("CA path (Enter to skip): ")).trim();
   if (!manual) return null;
   if (/[<>]/.test(manual)) {
-    warn("경로에 placeholder 문자(< 또는 >)가 있어 적용하지 않습니다.");
+    warn("Not applying — path contains a placeholder character (< or >).");
     return null;
   }
   if (!existsSync(manual)) {
-    warn(`파일을 찾을 수 없습니다: ${manual} — 적용하지 않습니다.`);
+    warn(`File not found: ${manual} — not applying.`);
     return null;
   }
   return manual;
@@ -415,6 +424,8 @@ interface WriteConfigArgs {
   detected: Partial<Record<SupportedCli, AgentInfo>>;
   /** Optional NODE_EXTRA_CA_CERTS path for the bot's launchd env. */
   caCert: string | null;
+  /** Telegram chat UX locale ("en" | "ko"). */
+  locale: string;
 }
 
 /** Read `allowedUserIds` from an existing config.json, if any. Missing
@@ -447,6 +458,7 @@ function writeConfig(home: string, args: WriteConfigArgs): void {
     allowedUserIds: args.allowedUserIds,
     cwd: existing.cwd ?? "./workspace",
     defaultAgent: args.defaultAgent,
+    locale: args.locale,
     agents: {
       claude: {
         path: args.detected.claude?.path ?? "",

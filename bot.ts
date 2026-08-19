@@ -42,6 +42,7 @@ import { createRateLimiter } from "./lib/rate-limiter.ts";
 import { DEFAULT_DANGER_PATTERNS, type DangerPattern } from "./lib/danger-patterns.ts";
 import { writeFileAtomic } from "./lib/atomic-write.ts";
 import { sweepStaleSessionDirs } from "./lib/session-sweep.ts";
+import { getMessages } from "./lib/messages.ts";
 
 // ---------- types ----------
 type Agent = "claude" | "codex" | "pi" | "gemini";
@@ -107,6 +108,8 @@ interface Config {
   sessionRetentionDays?: number;
   /** Per-chat rate limit. Default 30 messages per 60 seconds. */
   rateLimit?: { maxPerWindow?: number; windowMs?: number };
+  /** Telegram chat UX locale. "en" | "ko"; undefined (existing installs) → ko. */
+  locale?: string;
 }
 
 interface TgUser { id: number; username?: string; first_name?: string; }
@@ -306,6 +309,11 @@ for (;;) {
 config.cwd = resolvePath(HOME, config.cwd);
 mkdirSync(config.cwd, { recursive: true });
 
+// ---------- i18n ----------
+// Resolved once at boot from config.locale — undefined (existing installs)
+// keeps today's Korean UX; new installs default to English (D2).
+const M = getMessages(config.locale);
+
 // ---------- single-instance lock ----------
 // Only one bot process may run per CLICLAW_HOME — two pollers racing the
 // same Telegram getUpdates offset would double-handle messages and stomp
@@ -369,12 +377,12 @@ function agentIdleTimeoutMs(agent: Agent): number | undefined {
   return config.agents[agent].idleTimeoutMs ?? config.idleTimeoutMs;
 }
 function agentModeLabel(agent: Agent): string {
-  const safetyTag = safetyEnabled ? " + 안전모드 ON" : "";
-  if (agent === "claude") return confirmGateEnabled ? `헤드리스${safetyTag}` : "헤드리스";
-  if (agent === "codex")  return `sandbox=${config.agents.codex.sandbox}${confirmGateEnabled ? safetyTag : ""}`;
-  if (agent === "pi")     return "기본";
-  if (agent === "gemini") return `approvalMode=${config.agents.gemini.approvalMode ?? "auto_edit"} — confirm 게이트 미적용`;
-  return "?";
+  return M.agentModeLabel(agent, {
+    confirmGateEnabled,
+    safetyEnabled,
+    codexSandbox: config.agents.codex.sandbox,
+    geminiApprovalMode: config.agents.gemini.approvalMode ?? "auto_edit",
+  });
 }
 
 // Persist user-supplied extra patterns to a file the hook can read.
@@ -525,7 +533,7 @@ const MAX_LEN = 4096;
  * the HTML-converted output to respect Telegram's 4096-char limit.
  */
 async function sendMessage(chatId: number, text: string): Promise<void> {
-  if (!text) text = "(빈 응답)";
+  if (!text) text = M.emptyResponse;
   const html = markdownToTelegramHtml(text);
   await sendChunkedHtml(chatId, html, text);
   audit.write({ chatId, type: "msg_out", data: { len: text.length } });
@@ -615,23 +623,13 @@ function findDangerPattern(id: string): DangerPattern | undefined {
 }
 
 function confirmMessageText(req: ConfirmRequest): string {
-  const truncated = req.command.length > 800 ? req.command.slice(0, 800) + "…" : req.command;
-  const just = findDangerPattern(req.patternId)?.justification;
-  return [
-    "⚠️ 위험 명령 확인",
-    "",
-    `에이전트: ${req.agent}`,
-    `패턴: ${req.patternId} — ${req.reason}`,
-    ...(just ? ["", `이유: ${just}`] : []),
-    "",
-    "명령:",
-    truncated,
-  ].join("\n");
-}
-
-function confirmOutcomeText(decision: "allow" | "deny", reason?: string): string {
-  if (decision === "allow") return "✅ 허용됨";
-  return reason ? `❌ 거부됨: ${reason}` : "❌ 거부됨";
+  return M.confirmMessageText({
+    agent: req.agent,
+    patternId: req.patternId,
+    reason: req.reason,
+    command: req.command,
+    justification: findDangerPattern(req.patternId)?.justification,
+  });
 }
 
 if (confirmGateEnabled) {
@@ -653,7 +651,7 @@ async function promptConfirm(req: ConfirmRequest): Promise<void> {
   // own external Bash guards (pre-bash-guard, EDR, etc.) and we pass the
   // request straight through without surfacing a Telegram prompt.
   if (!safetyEnabled) {
-    confirmServer?.respond(req.requestId, "allow", "안전모드 OFF (사용자 환경의 외부 가드에 위임)");
+    confirmServer?.respond(req.requestId, "allow", M.confirmReasonSafetyOff);
     audit.write({
       chatId: req.chatId, type: "confirm_decision", agent: req.agent,
       data: { requestId: req.requestId, patternId: req.patternId, decision: "allow", reason: "safety_off" },
@@ -667,7 +665,7 @@ async function promptConfirm(req: ConfirmRequest): Promise<void> {
   const pattern = findDangerPattern(req.patternId);
   if (pattern?.decision === "forbidden") {
     const why = pattern.justification ?? pattern.reason;
-    confirmServer?.respond(req.requestId, "deny", `정책상 거부: ${why}`);
+    confirmServer?.respond(req.requestId, "deny", M.confirmReasonForbidden(why));
     audit.write({
       chatId: req.chatId, type: "confirm_decision", agent: req.agent,
       data: {
@@ -680,10 +678,7 @@ async function promptConfirm(req: ConfirmRequest): Promise<void> {
     });
     try {
       const cmd = req.command.length > 200 ? req.command.slice(0, 200) + "…" : req.command;
-      await sendMessage(
-        req.chatId,
-        `🛑 정책상 거부된 명령 — pattern=${req.patternId}\n사유: ${why}\n\n명령:\n${cmd}`,
-      );
+      await sendMessage(req.chatId, M.forbiddenCommandNotice(req.patternId, why, cmd));
     } catch (err) {
       log("error", `forbidden notice failed: ${err}`);
     }
@@ -695,15 +690,15 @@ async function promptConfirm(req: ConfirmRequest): Promise<void> {
       text: confirmMessageText(req),
       reply_markup: {
         inline_keyboard: [[
-          { text: "✅ 허용", callback_data: `confirm:${req.requestId}:allow` },
-          { text: "❌ 거부", callback_data: `confirm:${req.requestId}:deny` },
+          { text: M.confirmAllowButton, callback_data: `confirm:${req.requestId}:allow` },
+          { text: M.confirmDenyButton, callback_data: `confirm:${req.requestId}:deny` },
         ]],
       },
     });
     confirmMessages.set(req.requestId, { messageId: msg.message_id, chatId: req.chatId });
   } catch (err) {
     log("error", `confirm prompt failed: ${err}`);
-    confirmServer?.respond(req.requestId, "deny", "사용자에게 프롬프트를 띄우지 못함");
+    confirmServer?.respond(req.requestId, "deny", M.confirmReasonPromptFailed);
   }
 }
 
@@ -711,13 +706,13 @@ async function handleCallbackQuery(q: TgCallbackQuery): Promise<void> {
   if (q.message && isNonPrivateChat(q.message.chat.type)) return;
   const userId = q.from.id;
   if (!config.allowedUserIds.includes(userId)) {
-    await tg("answerCallbackQuery", { callback_query_id: q.id, text: "권한 없음" });
+    await tg("answerCallbackQuery", { callback_query_id: q.id, text: M.callbackUnauthorized });
     return;
   }
   const data = q.data ?? "";
   const m = data.match(/^confirm:([0-9a-f-]+):(allow|deny)$/);
   if (!m) {
-    await tg("answerCallbackQuery", { callback_query_id: q.id, text: "잘못된 콜백" });
+    await tg("answerCallbackQuery", { callback_query_id: q.id, text: M.callbackInvalid });
     return;
   }
   const [, requestId, decisionStr] = m;
@@ -730,7 +725,7 @@ async function handleCallbackQuery(q: TgCallbackQuery): Promise<void> {
   });
   await tg("answerCallbackQuery", {
     callback_query_id: q.id,
-    text: handled ? (decision === "allow" ? "허용" : "거부") : "이미 만료됨",
+    text: handled ? (decision === "allow" ? M.callbackAllowed : M.callbackDenied) : M.callbackExpired,
   });
   if (rec && handled) {
     confirmMessages.delete(requestId);
@@ -738,7 +733,7 @@ async function handleCallbackQuery(q: TgCallbackQuery): Promise<void> {
       await tg("editMessageText", {
         chat_id: rec.chatId,
         message_id: rec.messageId,
-        text: confirmOutcomeText(decision),
+        text: M.confirmOutcomeText(decision),
       });
     } catch { /* user may have deleted the message; ignore */ }
   }
@@ -869,13 +864,13 @@ async function runClaude(
   });
 
   if (killedReason === "abort") {
-    return { sessionId, text: "", error: "사용자가 중지함" };
+    return { sessionId, text: "", error: M.userStoppedError };
   }
   if (killedReason === "timeout") {
-    return { sessionId, text: "", error: `타임아웃 (${timeoutMs}ms 초과)` };
+    return { sessionId, text: "", error: M.timeoutError(timeoutMs) };
   }
   if (killedReason === "idle") {
-    return { sessionId, text: "", error: `무활동 타임아웃 (${idleTimeoutMs}ms)` };
+    return { sessionId, text: "", error: M.idleTimeoutError(idleTimeoutMs) };
   }
 
   if (errorDetail || rawErrorPayload) {
@@ -999,9 +994,9 @@ async function runCodex(
     onStdoutLine: onLine,
   });
 
-  if (killedReason === "abort") return { sessionId: null, text: "", error: "사용자가 중지함" };
-  if (killedReason === "timeout") return { sessionId: null, text: "", error: `타임아웃 (${timeoutMs}ms 초과)` };
-  if (killedReason === "idle") return { sessionId: null, text: "", error: `무활동 타임아웃 (${idleTimeoutMs}ms)` };
+  if (killedReason === "abort") return { sessionId: null, text: "", error: M.userStoppedError };
+  if (killedReason === "timeout") return { sessionId: null, text: "", error: M.timeoutError(timeoutMs) };
+  if (killedReason === "idle") return { sessionId: null, text: "", error: M.idleTimeoutError(idleTimeoutMs) };
 
   let text = "";
   try { text = readFileSync(outFile, "utf8").trim(); } catch { /* not written */ }
@@ -1053,9 +1048,9 @@ async function runPi(
     onStdoutLine: onLine,
   });
 
-  if (killedReason === "abort") return { sessionId: null, text: "", error: "사용자가 중지함" };
-  if (killedReason === "timeout") return { sessionId: null, text: "", error: `타임아웃 (${timeoutMs}ms 초과)` };
-  if (killedReason === "idle") return { sessionId: null, text: "", error: `무활동 타임아웃 (${idleTimeoutMs}ms)` };
+  if (killedReason === "abort") return { sessionId: null, text: "", error: M.userStoppedError };
+  if (killedReason === "timeout") return { sessionId: null, text: "", error: M.timeoutError(timeoutMs) };
+  if (killedReason === "idle") return { sessionId: null, text: "", error: M.idleTimeoutError(idleTimeoutMs) };
 
   const text = stripAnsi(stdout).trim();
   if (exitCode !== 0) {
@@ -1130,9 +1125,9 @@ async function runGemini(
     onStdoutLine: onLine,
   });
 
-  if (killedReason === "abort") return { sessionId: null, text: "", error: "사용자가 중지함" };
-  if (killedReason === "timeout") return { sessionId: null, text: "", error: `타임아웃 (${timeoutMs}ms 초과)` };
-  if (killedReason === "idle") return { sessionId: null, text: "", error: `무활동 타임아웃 (${idleTimeoutMs}ms)` };
+  if (killedReason === "abort") return { sessionId: null, text: "", error: M.userStoppedError };
+  if (killedReason === "timeout") return { sessionId: null, text: "", error: M.timeoutError(timeoutMs) };
+  if (killedReason === "idle") return { sessionId: null, text: "", error: M.idleTimeoutError(idleTimeoutMs) };
 
   // When streaming via stream-json, `streamedText` is the canonical
   // answer (it's what the user already saw). Plain stdout contains the
@@ -1233,7 +1228,7 @@ function parseAgentSwitch(text: string): Agent | null {
 }
 
 function safetyLabel(): string {
-  if (!confirmGateEnabled) return "비활성 (config)";
+  if (!confirmGateEnabled) return M.safetyDisabledLabel;
   return safetyEnabled ? "ON" : "OFF";
 }
 
@@ -1241,80 +1236,44 @@ async function handleSafetyCommand(chatId: number, arg: string): Promise<void> {
   // When the hook was disabled at boot via config, the toggle is inert —
   // the wired pre-tool hook simply isn't there to ask in the first place.
   if (!confirmGateEnabled) {
-    await sendMessage(
-      chatId,
-      "안전모드는 이 설치본에서 비활성화되어 있습니다 (config.confirmGate.enabled=false).\n" +
-        "다시 활성화하려면 config.json을 수정하고 봇을 재시작하세요.",
-    );
+    await sendMessage(chatId, M.safetyDisabledNotice);
     return;
   }
   if (arg === "" || arg === "status") {
     const state = safetyEnabled ? "ON" : "OFF";
-    const detail = safetyEnabled
-      ? "위험 Bash 명령은 텔레그램 confirm 으로 다시 묻고, Claude 의 Read 도구가 ~/.ssh · ~/.aws · .env · *.pem · id_rsa 등 민감 파일을 차단합니다."
-      : "모든 Bash 명령이 즉시 실행되고, 민감 파일 deny 룰도 비활성화됩니다. 본인 환경의 외부 가드(pre-bash-guard, EDR 등)에 위임된 상태입니다.";
-    await sendMessage(chatId, `🛡 안전모드: ${state}\n${detail}\n\n사용: /safety on · /safety off`);
+    const detail = safetyEnabled ? M.safetyStatusDetailOn : M.safetyStatusDetailOff;
+    await sendMessage(chatId, M.safetyStatusMessage(state, detail));
     return;
   }
   if (arg === "on") {
-    if (safetyEnabled) { await sendMessage(chatId, "🛡 안전모드는 이미 ON 입니다."); return; }
+    if (safetyEnabled) { await sendMessage(chatId, M.safetyAlreadyOn); return; }
     safetyEnabled = true;
     saveSafety(true);
     applySafetyDenyRules();
     log("info", `safety: ON (chat=${chatId})`);
-    await sendMessage(
-      chatId,
-      "🛡 안전모드 ON.\n" +
-        "• 위험 Bash 명령은 텔레그램 confirm 으로 다시 묻습니다.\n" +
-        "• Claude 의 Read 도구가 ~/.ssh, ~/.aws, .env, *.pem, id_rsa 등 민감 파일을 차단합니다.",
-    );
+    await sendMessage(chatId, M.safetyOnNotice);
     return;
   }
   if (arg === "off") {
-    if (!safetyEnabled) { await sendMessage(chatId, "🛡 안전모드는 이미 OFF 입니다."); return; }
+    if (!safetyEnabled) { await sendMessage(chatId, M.safetyAlreadyOff); return; }
     safetyEnabled = false;
     saveSafety(false);
     applySafetyDenyRules();
     log("info", `safety: OFF (chat=${chatId})`);
-    await sendMessage(
-      chatId,
-      "🛡 안전모드 OFF. Bash 게이트 + 민감 파일 deny 룰이 비활성화됩니다.\n" +
-        "본인 환경의 외부 가드(pre-bash-guard, EDR 등)가 위험 명령을 차단하는지 확인하세요.",
-    );
+    await sendMessage(chatId, M.safetyOffNotice);
     return;
   }
-  await sendMessage(chatId, "사용: /safety · /safety on · /safety off");
+  await sendMessage(chatId, M.safetyUsage);
 }
 
 function helpText(active: Agent): string {
-  const labels: Record<Agent, string> = {
-    claude: "  /claude  — Anthropic Claude Code",
-    codex:  "  /codex   — OpenAI Codex",
-    pi:     "  /pi      — Pi Coding Agent",
-    gemini: "  /gemini  — Google Gemini CLI",
-  };
-  const switchLines = AGENT_NAMES.map((a) => labels[a]);
-  return [
-    "🤖 로컬 멀티에이전트 봇",
-    "",
-    `현재 에이전트: ${active}`,
-    "",
-    "에이전트 전환:",
-    ...switchLines,
-    "",
-    "세션 명령:",
-    "  /reset      — 현재 에이전트 세션 초기화",
-    "  /reset all  — 이 채팅의 모든 에이전트 세션 초기화",
-    "  /status     — 에이전트별 세션 상태 + 진행 중 작업 표시",
-    "  /health     — 봇 헬스 (가동시간, 메모리, 로그 크기)",
-    "  /stop       — 진행 중 작업 취소",
-    "  /safety     — 안전모드 상태 (/safety on · off로 토글)",
-    "  /help       — 이 도움말",
-    "",
-    `작업 디렉토리: ${config.cwd}`,
-    `안전모드: ${safetyLabel()}`,
-    `스트리밍: ${streamingEnabled ? "ON (claude)" : "OFF"}`,
-  ].join("\n");
+  return M.helpText({
+    active,
+    agentNames: AGENT_NAMES,
+    cwd: config.cwd,
+    safetyLabel: safetyLabel(),
+    streamingLabel: streamingEnabled ? "ON (claude)" : "OFF",
+  });
 }
 
 function fmtMs(ms: number | undefined): string {
@@ -1363,49 +1322,45 @@ function healthText(): string {
   const activeChats = Object.keys(store).length;
   const inFlight = jobs.size();
 
-  const lines = [
-    "🩺 cliclaw 헬스",
-    "",
-    `가동시간: ${uptime}`,
-    `메모리: RSS ${rss}, heap ${heap}`,
-    `에이전트 활성: ${AGENT_NAMES.join(", ")} (총 ${AGENT_NAMES.length}/${ALL_AGENTS.length})`,
-    `활성 채팅: ${activeChats}`,
-    `진행 중 작업: ${inFlight}`,
-    "",
-    "로그:",
-    `  bot.log    ${fmtBytes(logSize)}`,
-    `  audit.json ${fmtBytes(auditSize)}`,
-    `  bot.err    ${fmtBytes(errSize)}`,
-    "",
-    `안전모드: ${safetyLabel()}`,
-    confirmServer ? `위험명령 게이트 대기: ${confirmServer.pendingCount()}` : "위험명령 게이트: OFF (config)",
-  ];
-  return lines.join("\n");
+  return M.healthText({
+    uptime,
+    rss,
+    heap,
+    agentNames: AGENT_NAMES,
+    totalAgents: ALL_AGENTS.length,
+    activeChats,
+    inFlight,
+    logSize: fmtBytes(logSize),
+    auditSize: fmtBytes(auditSize),
+    errSize: fmtBytes(errSize),
+    safetyLabel: safetyLabel(),
+    confirmPending: confirmServer ? confirmServer.pendingCount() : null,
+  });
 }
 
 function statusText(chat: ChatState, chatId: number): string {
-  const lines = [`현재: ${chat.active}`, ""];
-  for (const a of AGENT_NAMES) {
+  const rows = AGENT_NAMES.map((a) => {
     const s = chat.agents[a];
-    const mode = agentModeLabel(a);
-    const tmo = `타임아웃=${fmtMs(agentTimeoutMs(a))} / 무활동=${fmtMs(agentIdleTimeoutMs(a))}`;
-    if (!s) {
-      lines.push(`${a}: (세션 없음)  모드: ${mode}  ${tmo}`);
-    } else {
-      const sid = s.sessionId ? s.sessionId.slice(0, 8) : "—";
-      lines.push(`${a}: 턴=${s.turnCount} 세션=${sid} 마지막=${s.lastUsedAt}`);
-      lines.push(`  모드: ${mode}  ${tmo}`);
-    }
-  }
+    return {
+      agent: a,
+      hasSession: !!s,
+      mode: agentModeLabel(a),
+      timeoutStr: fmtMs(agentTimeoutMs(a)),
+      idleStr: fmtMs(agentIdleTimeoutMs(a)),
+      turnCount: s?.turnCount,
+      sessionIdShort: s ? (s.sessionId ? s.sessionId.slice(0, 8) : "—") : undefined,
+      lastUsedAt: s?.lastUsedAt,
+    };
+  });
   const inFlight = jobs.get(chatId);
-  if (inFlight) {
-    const elapsed = Math.round((Date.now() - inFlight.startedAt.getTime()) / 1000);
-    lines.push("", `🏃 진행 중: ${inFlight.agent} (${elapsed}초) — /stop 으로 취소`);
-  }
-  if (confirmServer) {
-    lines.push("", `위험명령 확인 게이트: ON, 대기중=${confirmServer.pendingCount()}`);
-  }
-  return lines.join("\n");
+  return M.statusText({
+    activeAgent: chat.active,
+    rows,
+    inProgress: inFlight
+      ? { agent: inFlight.agent, elapsedSec: Math.round((Date.now() - inFlight.startedAt.getTime()) / 1000) }
+      : null,
+    confirmGatePending: confirmServer ? confirmServer.pendingCount() : null,
+  });
 }
 
 /**
@@ -1464,7 +1419,7 @@ async function handleMessage(msg: TgMessage): Promise<void> {
   if (isNonPrivateChat(msg.chat.type)) {
     if (!nonPrivateChatsWarned.has(chatId)) {
       nonPrivateChatsWarned.add(chatId);
-      await sendMessage(chatId, "이 봇은 1:1 채팅에서만 동작합니다. 그룹에서는 사용할 수 없어요.");
+      await sendMessage(chatId, M.groupChatOnly);
     }
     return;
   }
@@ -1473,13 +1428,13 @@ async function handleMessage(msg: TgMessage): Promise<void> {
   if (config.allowedUserIds.length === 0) {
     log("info", `UNAUTH msg from user_id=${userId} (@${msg.from?.username}) chat_id=${chatId}: "${text.slice(0, 80)}"`);
     log("info", `→ add ${userId} to config.allowedUserIds to allow this user`);
-    await sendMessage(chatId, `권한이 없습니다. 본인 user_id=${userId}\n관리자에게 화이트리스트 등록을 요청하세요.`);
+    await sendMessage(chatId, M.unauthorizedWithId(userId));
     return;
   }
   if (!config.allowedUserIds.includes(userId)) {
     log("info", `denied user_id=${userId}`);
     audit.write({ chatId, userId, type: "error", data: { kind: "unauthorized" } });
-    await sendMessage(chatId, "권한이 없습니다.");
+    await sendMessage(chatId, M.unauthorized);
     return;
   }
 
@@ -1491,7 +1446,7 @@ async function handleMessage(msg: TgMessage): Promise<void> {
     const seconds = Math.ceil(decision.retryAfterMs / 1000);
     log("info", `rate limited chat=${chatId} retry_in=${seconds}s`);
     audit.write({ chatId, userId, type: "error", data: { kind: "rate_limited", retry_after_ms: decision.retryAfterMs } });
-    await sendMessage(chatId, `⏳ 너무 빠릅니다. ${seconds}초 후 다시 시도해주세요.`);
+    await sendMessage(chatId, M.rateLimited(seconds));
     return;
   }
 
@@ -1505,7 +1460,7 @@ async function handleMessage(msg: TgMessage): Promise<void> {
     const r = await downloadMessageImages(msg);
     mediaPaths = r.paths;
     for (const err of r.errors) {
-      await sendMessage(chatId, `⚠️ 첨부 다운로드 실패: ${err}`);
+      await sendMessage(chatId, M.attachmentDownloadFailed(err));
     }
     if (mediaPaths.length === 0) return; // every attachment failed; bail out
   }
@@ -1524,8 +1479,7 @@ async function handleMessage(msg: TgMessage): Promise<void> {
     chat.active = switchTo;
     saveStore(store);
     const s = chat.agents[switchTo];
-    const tail = s ? ` (이어가기, ${s.turnCount}턴)` : " (새 세션)";
-    await sendMessage(chatId, `✅ ${switchTo}로 전환됨${tail}`);
+    await sendMessage(chatId, M.switchedAgent(switchTo, s ? s.turnCount : null));
     return;
   }
 
@@ -1552,9 +1506,9 @@ async function handleMessage(msg: TgMessage): Promise<void> {
     audit.write({ chatId, userId, type: "stop", data: { hadJob: !!cancelled, agent: cancelled?.agent } });
     if (cancelled) {
       const elapsed = Math.round((Date.now() - cancelled.startedAt.getTime()) / 1000);
-      await sendMessage(chatId, `🛑 [${cancelled.agent}] ${elapsed}초 경과 — 중지 중…`);
+      await sendMessage(chatId, M.stopCancelled(cancelled.agent, elapsed));
     } else {
-      await sendMessage(chatId, "ℹ️ 진행 중인 작업이 없습니다.");
+      await sendMessage(chatId, M.noJobInProgress);
     }
     return;
   }
@@ -1564,11 +1518,11 @@ async function handleMessage(msg: TgMessage): Promise<void> {
     if (text === "/reset all") {
       chat.agents = {};
       saveStore(store);
-      await sendMessage(chatId, "🧹 이 채팅의 모든 에이전트 세션을 초기화했습니다.");
+      await sendMessage(chatId, M.resetAllDone);
     } else {
       delete chat.agents[chat.active];
       saveStore(store);
-      await sendMessage(chatId, `🧹 ${chat.active} 세션을 초기화했습니다.`);
+      await sendMessage(chatId, M.resetAgentDone(chat.active));
     }
     return;
   }
@@ -1576,13 +1530,13 @@ async function handleMessage(msg: TgMessage): Promise<void> {
   if (mediaPaths.length > 0) {
     // An image-bearing message is always a prompt — never a command — and
     // we prepend the file paths so Claude can pick them up via Read.
-    if (!text) text = "첨부 이미지를 분석해줘.";
+    if (!text) text = M.defaultImagePrompt;
     const refs = mediaPaths.map((p) => `- ${p}`).join("\n");
-    text = `${text}\n\n[첨부 이미지 — Read 도구로 열어 분석할 것]\n${refs}`;
+    text = `${text}${M.imageAttachmentNote(refs)}`;
   }
 
   if (!text || text.startsWith("/")) {
-    if (text.startsWith("/")) await sendMessage(chatId, `알 수 없는 명령: ${text}\n\n${helpText(chat.active)}`);
+    if (text.startsWith("/")) await sendMessage(chatId, M.unknownCommand(text, helpText(chat.active)));
     return;
   }
 
@@ -1590,10 +1544,7 @@ async function handleMessage(msg: TgMessage): Promise<void> {
   if (existing) {
     const elapsed = Math.round((Date.now() - existing.startedAt.getTime()) / 1000);
     audit.write({ chatId, userId, type: "lock_reject", data: { agent: existing.agent, elapsedSec: elapsed } });
-    await sendMessage(
-      chatId,
-      `⏳ [${existing.agent}] 작업 진행 중 (${elapsed}초). /stop 으로 취소하거나 종료를 기다리세요.`,
-    );
+    await sendMessage(chatId, M.jobInProgressLock(existing.agent, elapsed));
     return;
   }
 
@@ -1606,14 +1557,14 @@ async function handleMessage(msg: TgMessage): Promise<void> {
     delete chat.agents[agent];
     saveStore(store);
     sessionBefore = undefined;
-    await sendMessage(chatId, `🧹 [${agent}] ${maxTurns}턴 도달 — 세션 자동 초기화. 이전 컨텍스트는 사라집니다.`);
+    await sendMessage(chatId, M.autoResetTurns(agent, maxTurns));
   }
 
   let job: Job;
   try {
     job = jobs.register(chatId, agent);
   } catch {
-    await sendMessage(chatId, `⏳ [${agent}] 작업 진행 중. /stop 으로 취소하세요.`);
+    await sendMessage(chatId, M.jobAlreadyRegistered(agent));
     return;
   }
   audit.write({ chatId, userId, type: "agent_start", agent });
@@ -1662,7 +1613,7 @@ async function handleMessage(msg: TgMessage): Promise<void> {
     if (
       agent === "claude" &&
       result.error &&
-      result.error !== "사용자가 중지함" &&
+      result.error !== M.userStoppedError &&
       sessionBefore && sessionBefore.turnCount > 0 &&
       /no conversation|session|continue|resume/i.test(result.error)
     ) {
@@ -1687,18 +1638,18 @@ async function handleMessage(msg: TgMessage): Promise<void> {
     if (stream && stream.hasContent()) {
       // The streamer already rendered the answer; just flush the final state.
       await stream.close();
-      if (result.error) await sendMessage(chatId, `⚠️ [${agent}] ${result.error}`);
+      if (result.error) await sendMessage(chatId, M.agentError(agent, result.error));
     } else if (result.error) {
-      await sendMessage(chatId, `⚠️ [${agent}] ${result.error}`);
+      await sendMessage(chatId, M.agentError(agent, result.error));
     } else {
-      await sendMessage(chatId, `[${agent}] ${result.text || "(빈 응답)"}`);
+      await sendMessage(chatId, M.agentReply(agent, result.text || M.emptyResponse));
     }
     // Move the rolling tool bubble below the answer (or remove it if nothing was used).
     await toolIndicator.finalize();
   } catch (err) {
     log("error", `handler failed: ${err instanceof Error ? err.stack : err}`);
     audit.write({ chatId, userId, type: "error", agent, data: { err: err instanceof Error ? err.message : String(err) } });
-    await sendMessage(chatId, `⚠️ 내부 오류: ${err instanceof Error ? err.message : String(err)}`);
+    await sendMessage(chatId, M.internalError(err instanceof Error ? err.message : String(err)));
     // Best effort: clean up any rolling bubble so it doesn't linger over the error.
     try { await toolIndicator.clear(); } catch { /* swallow */ }
   } finally {
@@ -1724,7 +1675,7 @@ const shutdown = (signal: string): void => {
       const sends = jobs.entries().map(async (job) => {
         jobs.cancel(job.chatId);
         try {
-          await sendMessage(job.chatId, "⚠️ 봇이 재시작됩니다 — 진행 중이던 작업이 중단되었습니다. 다시 보내주세요.");
+          await sendMessage(job.chatId, M.shutdownRestartNotice);
         } catch { /* best effort — never block shutdown on a failed notify */ }
       });
       await Promise.race([Promise.allSettled(sends), sleep(3000)]);
@@ -1758,13 +1709,13 @@ async function pollLoop(): Promise<void> {
   try {
     await tg("setMyCommands", {
       commands: [
-        ...AGENT_NAMES.map((a) => ({ command: a, description: `${a} 에이전트로 전환` })),
-        { command: "status", description: "에이전트별 세션 상태" },
-        { command: "reset", description: "현재 에이전트 세션 초기화" },
-        { command: "health", description: "봇 헬스 (가동시간/메모리)" },
-        { command: "stop", description: "진행 중 작업 취소" },
-        { command: "safety", description: "안전모드 상태/토글" },
-        { command: "help", description: "도움말" },
+        ...AGENT_NAMES.map((a) => ({ command: a, description: M.commandDescAgent(a) })),
+        { command: "status", description: M.commandDescStatus },
+        { command: "reset", description: M.commandDescReset },
+        { command: "health", description: M.commandDescHealth },
+        { command: "stop", description: M.commandDescStop },
+        { command: "safety", description: M.commandDescSafety },
+        { command: "help", description: M.commandDescHelp },
       ],
     });
     log("info", "setMyCommands registered");

@@ -3,6 +3,7 @@
   "allowedUserIds": [],
   "cwd": "./workspace",
   "defaultAgent": "claude",
+  "locale": "en",
   "agents": {
     "claude": {
       "path": "",
