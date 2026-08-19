@@ -98,7 +98,8 @@ All set.
 | `cliclaw start` | 봇을 포그라운드로 실행 (테스트용) |
 | `cliclaw install-launchd` | LaunchAgent 설치 (config.json 의 `launchd.extraEnv` 자동 반영) |
 | `cliclaw uninstall-launchd` | LaunchAgent 제거 |
-| `cliclaw upgrade` | npm 최신 버전을 받아 LaunchAgent 재설치 |
+| `cliclaw upgrade` (별칭: `update`) | npm 최신 버전을 받아 LaunchAgent 재설치 |
+| `cliclaw version` (`--version`, `-v`) | 설치된 cliclaw 버전 출력 |
 | `cliclaw logs [--audit\|--err]` | 로그 파일 tail (기본: `bot.log`; `--audit`: `audit.jsonl`; `--err`: `bot.err`) |
 | `cliclaw doctor` | 실시간 점검: 토큰, launchd, 에이전트, TLS CA |
 | `cliclaw help` | 도움말 |

@@ -20,7 +20,7 @@ import { existsSync, readFileSync } from "node:fs";
 
 import * as launchd from "./lib/launchd.ts";
 import { resolveCliPath } from "./lib/resolve-cli-path.ts";
-import { printBanner } from "./lib/banner.ts";
+import { printBanner, readVersion } from "./lib/banner.ts";
 
 const ROOT = dirname(Bun.fileURLToPath(import.meta.url));
 const ENTRY_TS = resolve(ROOT, "bot.ts");
@@ -38,9 +38,16 @@ async function main(): Promise<void> {
   const [cmd, ...rest] = process.argv.slice(2);
   // Skip the banner on `start` because the bot daemon's stdout follows
   // immediately afterward and the art would just push real logs off-screen
-  // / mix with launchd's bot.log. Every other command is interactive.
-  if (cmd !== "start") printBanner(import.meta.url);
+  // / mix with launchd's bot.log. `version` stays bare so scripts can
+  // consume the output. Every other command is interactive.
+  const isVersionCmd = cmd === "version" || cmd === "--version" || cmd === "-v";
+  if (cmd !== "start" && !isVersionCmd) printBanner(import.meta.url);
   switch (cmd ?? "help") {
+    case "version":
+    case "--version":
+    case "-v":
+      console.log(readVersion(ROOT));
+      break;
     case "init":
       await cmdInit();
       break;
@@ -57,6 +64,7 @@ async function main(): Promise<void> {
       await cmdDoctor();
       break;
     case "upgrade":
+    case "update":
       await cmdUpgrade();
       break;
     case "logs":
@@ -352,7 +360,8 @@ Commands:
   start              Run the bot in the foreground
   install-launchd    Install + load macOS LaunchAgent
   uninstall-launchd  Unload + remove macOS LaunchAgent
-  upgrade            Pull @latest from npm and reinstall LaunchAgent
+  upgrade | update   Pull @latest from npm and reinstall LaunchAgent
+  version            Print the installed cliclaw version
   logs [--audit|--err]
                      tail -F a log file (default: bot.log)
   doctor             Live checks: token, launchd, agents, TLS CA

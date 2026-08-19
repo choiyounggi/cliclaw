@@ -40,7 +40,7 @@ function colorize(line: string, idx: number): string {
   return `${GRADIENT[idx] ?? ""}${line}${RESET}`;
 }
 
-function readVersion(rootDir: string): string {
+export function readVersion(rootDir: string): string {
   try {
     const pkg = JSON.parse(readFileSync(join(rootDir, "package.json"), "utf8"));
     return typeof pkg.version === "string" ? pkg.version : "?";
