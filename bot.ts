@@ -34,13 +34,14 @@ import {
 } from "./lib/hook-installer.ts";
 import { createStreamingMessage, type StreamingMessage } from "./lib/telegram-stream.ts";
 import { createToolIndicator, type ToolIndicator } from "./lib/tool-indicator.ts";
-import { markdownToTelegramHtml } from "./lib/telegram-html.ts";
+import { markdownToTelegramHtml, autoCloseUnfinished } from "./lib/telegram-html.ts";
 import { downloadTelegramFile, inferExtension, makeMediaPath } from "./lib/media-download.ts";
 import { resolveCliPath } from "./lib/resolve-cli-path.ts";
 import { rotateIfLarge, truncateIfLarge } from "./lib/log-rotate.ts";
 import { createRateLimiter } from "./lib/rate-limiter.ts";
 import { DEFAULT_DANGER_PATTERNS, type DangerPattern } from "./lib/danger-patterns.ts";
 import { writeFileAtomic } from "./lib/atomic-write.ts";
+import { sweepStaleSessionDirs } from "./lib/session-sweep.ts";
 
 // ---------- types ----------
 type Agent = "claude" | "codex" | "pi" | "gemini";
@@ -102,6 +103,8 @@ interface Config {
   stderrTruncateMb?: number;
   /** Days of inactivity before workspace/uploads/<chatId>/<file> is removed. Default 7. */
   uploadsRetentionDays?: number;
+  /** Days of inactivity before sessions/<agent>/<chatId> is removed. Default 30. `<= 0` disables. */
+  sessionRetentionDays?: number;
   /** Per-chat rate limit. Default 30 messages per 60 seconds. */
   rateLimit?: { maxPerWindow?: number; windowMs?: number };
 }
@@ -370,6 +373,7 @@ function agentModeLabel(agent: Agent): string {
   if (agent === "claude") return confirmGateEnabled ? `헤드리스${safetyTag}` : "헤드리스";
   if (agent === "codex")  return `sandbox=${config.agents.codex.sandbox}${confirmGateEnabled ? safetyTag : ""}`;
   if (agent === "pi")     return "기본";
+  if (agent === "gemini") return `approvalMode=${config.agents.gemini.approvalMode ?? "auto_edit"} — confirm 게이트 미적용`;
   return "?";
 }
 
@@ -422,7 +426,7 @@ function log(level: "debug" | "info" | "error", msg: string): void {
 const audit: AuditWriter = createAuditWriter(AUDIT_FILE, {
   maxBytes: AUDIT_ROTATE_BYTES,
   keep: AUDIT_ROTATE_KEEP,
-});
+}, { redact });
 
 // Per-chat sliding-window rate limit. Defaults are an abuse circuit-
 // breaker, not a quota — 30/min is well above a human typing pace but
@@ -1622,7 +1626,7 @@ async function handleMessage(msg: TgMessage): Promise<void> {
     ? createStreamingMessage({
         chatId,
         send: async (cid, t) => {
-          const html = markdownToTelegramHtml(t);
+          const html = markdownToTelegramHtml(autoCloseUnfinished(t));
           try {
             const m = await tg<TgMessage>("sendMessage", { chat_id: cid, text: html, parse_mode: "HTML" });
             return { message_id: m.message_id };
@@ -1632,12 +1636,21 @@ async function handleMessage(msg: TgMessage): Promise<void> {
           }
         },
         edit: async (cid, id, t) => {
-          const html = markdownToTelegramHtml(t);
+          const html = markdownToTelegramHtml(autoCloseUnfinished(t));
           try { await tg("editMessageText", { chat_id: cid, message_id: id, text: html, parse_mode: "HTML" }); }
           catch { await tg("editMessageText", { chat_id: cid, message_id: id, text: t }); }
         },
         minIntervalMs: streamMinIntervalMs,
         onError: (err) => log("error", `stream: ${err instanceof Error ? err.message : err}`),
+        fallbackSend: async (t) => {
+          try {
+            await sendMessage(chatId, t);
+            return true;
+          } catch {
+            return false;
+          }
+        },
+        measure: (t) => markdownToTelegramHtml(autoCloseUnfinished(t)).length,
       })
     : null;
 
@@ -1696,12 +1709,33 @@ async function handleMessage(msg: TgMessage): Promise<void> {
 
 // ---------- polling loop ----------
 let running = true;
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Drain in-flight jobs before exiting: cancel each (SIGTERMs its process
+// group via the abort-signal listener already wired in runAgent) and fire a
+// best-effort restart notice to its chat. The whole notify phase is bounded
+// at 3s so a stuck Telegram call can never delay shutdown, and every step is
+// wrapped so shutdown() itself can never throw or reject.
 const shutdown = (signal: string): void => {
   log("info", signal);
   running = false;
-  // Best-effort: stop confirm server so the socket file is cleaned up.
-  void confirmServer?.stop().catch(() => {});
-  releaseInstanceLock(HOME);
+  void (async () => {
+    try {
+      const sends = jobs.entries().map(async (job) => {
+        jobs.cancel(job.chatId);
+        try {
+          await sendMessage(job.chatId, "⚠️ 봇이 재시작됩니다 — 진행 중이던 작업이 중단되었습니다. 다시 보내주세요.");
+        } catch { /* best effort — never block shutdown on a failed notify */ }
+      });
+      await Promise.race([Promise.allSettled(sends), sleep(3000)]);
+    } catch (err) {
+      log("error", `shutdown drain failed: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      // Best-effort: stop confirm server so the socket file is cleaned up.
+      void confirmServer?.stop().catch(() => {});
+      try { releaseInstanceLock(HOME); } catch (err) { log("error", `releaseInstanceLock failed: ${err instanceof Error ? err.message : String(err)}`); }
+    }
+  })();
 };
 process.on("SIGINT", () => shutdown("SIGINT"));
 process.on("SIGTERM", () => shutdown("SIGTERM"));
@@ -1812,6 +1846,21 @@ sweepStaleUploads();
 // Re-sweep once a day so a long-running bot doesn't accumulate
 // week-old photos between restarts.
 setInterval(sweepStaleUploads, 24 * 60 * 60 * 1000).unref?.();
+
+// Sweep stale per-chat session dirs (sessions/<agent>/<chatId>) the same way.
+// Skipped entirely while any job is running — a running job's dir mtime is
+// always fresh anyway (jobs are bounded by agentTimeoutMs, far under any
+// practical retention window), so this is a no-op cost, not a lost sweep.
+function sweepStaleSessions(): void {
+  const retentionDays = config.sessionRetentionDays ?? 30;
+  if (jobs.size() > 0) return;
+  const removed = sweepStaleSessionDirs(SESSION_ROOT, retentionDays);
+  if (removed.length > 0) {
+    log("info", `session sweep: removed ${removed.length} stale chat dirs older than ${retentionDays}d`);
+  }
+}
+sweepStaleSessions();
+setInterval(sweepStaleSessions, 24 * 60 * 60 * 1000).unref?.();
 
 // ---------- startup ----------
 ensureWorkspaceClaudeSettings();

@@ -29,6 +29,7 @@
     }
   },
   "sessionTimeoutMs": 1800000,
+  "sessionRetentionDays": 30,
   "pollTimeoutSec": 30,
   "logLevel": "info",
   "confirmGate": {

@@ -48,6 +48,21 @@ describe("JobRegistry", () => {
     expect(r.size()).toBe(1);
   });
 
+  it("entries: returns all active jobs across chats", () => {
+    const r = new JobRegistry();
+    const j1 = r.register(1, "claude");
+    const j2 = r.register(2, "pi");
+    const entries = r.entries();
+    expect(entries).toHaveLength(2);
+    expect(entries).toContain(j1);
+    expect(entries).toContain(j2);
+  });
+
+  it("entries: returns [] when no jobs are active", () => {
+    const r = new JobRegistry();
+    expect(r.entries()).toEqual([]);
+  });
+
   it("abort.signal listeners receive cancellation event", () => {
     const r = new JobRegistry();
     const job = r.register(1, "claude");

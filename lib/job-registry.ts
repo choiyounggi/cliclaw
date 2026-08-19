@@ -42,4 +42,9 @@ export class JobRegistry {
   size(): number {
     return this.jobs.size;
   }
+
+  /** Snapshot of every currently active job, across all chats. */
+  entries(): Job[] {
+    return Array.from(this.jobs.values());
+  }
 }
