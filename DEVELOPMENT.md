@@ -115,13 +115,14 @@ cliclaw doctor
 
 ## 릴리스
 
-자세한 흐름은 README의 "릴리스 자동화" 섹션 + `.github/workflows/publish.yml` 헤더 참조. 요약:
+자세한 흐름은 README의 "릴리스 자동화" 섹션 + `.github/workflows/release.yml` 헤더 참조. 요약:
 
 ```bash
-npm version patch          # 또는 minor / major
-git push --follow-tags
-# 그 다음 GH UI 에서 Release publish → 워크플로 자동 npm publish
+bunx changeset             # PR 에서 변경 기록 (patch / minor / major)
+# PR 머지 → "chore: version packages" PR 자동 생성 → 머지 → 자동 npm publish + Release
 ```
+
+`npm version` 으로 손으로 버전을 올리지 말 것 — main 에 push 되는 순간 publish 된다.
 
 ## 자주 묻는 질문
 

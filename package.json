@@ -53,8 +53,7 @@
     "start": "bun run cli.ts start",
     "dev": "bun run --hot bot.ts",
     "test": "bun --bun x vitest run",
-    "test:watch": "bun --bun x vitest",
-    "version": "changeset version"
+    "test:watch": "bun --bun x vitest"
   },
   "devDependencies": {
     "@changesets/cli": "^3.0.1",

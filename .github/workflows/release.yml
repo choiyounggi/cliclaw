@@ -3,21 +3,22 @@
 # On every push to main, changesets/action checks the .changeset/ directory:
 #
 #   - If changeset files are pending, it opens/updates a "chore: version
-#     packages" PR that runs `npm run version` (-> `changeset version`) to
-#     bump package.json, write the changelog, and consume the changesets.
-#   - Once that PR is merged (so no changesets remain pending), it runs the
-#     `publish` command below and, on success, pushes the resulting git tag
-#     and creates a GitHub Release for it (changesets/action's default
-#     create-github-releases / push-git-tags behavior), using the workflow's
-#     own GITHUB_TOKEN.
+#     packages" PR that runs `changeset version` to bump package.json, write
+#     CHANGELOG.md, and consume the changesets.
+#   - Otherwise (e.g. right after that PR is merged) it runs
+#     `changeset publish`, which publishes package.json's version to npm if
+#     that version is not on npm yet, then pushes the `vX.Y.Z` tag and creates
+#     the matching GitHub Release. If the version is already on npm, nothing
+#     happens.
 #
-# This intentionally does NOT run `npm publish` or `changeset publish` here.
-# publish.yml already publishes to npm — triggered by `release: [published]`
-# — and holds the NPM_TOKEN secret. `npx changeset git-tag` only creates the
-# git tag (no npm publish, no token needed); changesets/action then pushes
-# that tag and creates the matching GitHub Release, which is exactly the
-# event publish.yml listens for. So this workflow versions + tags + releases,
-# and publish.yml (unchanged) does the actual npm publish. No new secrets.
+# npm publish happens HERE, not in publish.yml. The Release this workflow
+# creates uses GITHUB_TOKEN, and GitHub does not start new workflow runs for
+# events made with GITHUB_TOKEN — so publish.yml (`on: release: published`)
+# would never fire for it. publish.yml stays as the fallback for a Release a
+# maintainer creates by hand.
+#
+# Requires the repo setting "Allow GitHub Actions to create and approve pull
+# requests" (Settings → Actions → General) for the version PR.
 
 name: Release
 
@@ -44,20 +45,29 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Setup Node
+      # registry-url writes an .npmrc that reads NODE_AUTH_TOKEN, which
+      # `changeset publish` (it shells out to `npm publish`) picks up.
+      - name: Setup Node + npm registry auth
         uses: actions/setup-node@v4
         with:
           node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
 
       - name: Install dependencies
-        run: npm ci
+        run: bun install
 
-      - name: Version packages or tag + release
-        uses: changesets/action@v1
+      # changesets/action v2 is the line that supports @changesets/cli v3
+      # (v1 is for CLI v2).
+      - name: Version packages or publish
+        uses: changesets/action@v2
         with:
-          version: npm run version
-          publish: npx changeset git-tag
-          commit: "chore: version packages"
-          title: "chore: version packages"
+          publish-script: bunx changeset publish
+          commit-message: "chore: version packages"
+          pr-title: "chore: version packages"
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
