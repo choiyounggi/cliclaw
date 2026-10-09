@@ -311,20 +311,26 @@ Per-version changes live on [GitHub Releases](https://github.com/choiyounggi/cli
 
 ## Release automation (maintainer)
 
-Publishing a new version:
+Releases use [changesets](https://changesets.dev):
 
-```bash
-# 1) bump the version (auto-creates commit + tag)
-npm version patch          # or minor / major
+1. In the PR with a user-visible change, describe it (patch / minor / major):
+   ```bash
+   bunx changeset
+   ```
+2. Merge that PR. `.github/workflows/release.yml` opens (or updates) a
+   **"chore: version packages"** PR that bumps `package.json` and writes
+   `CHANGELOG.md`.
+3. Merge the version PR. The same workflow runs `changeset publish`
+   (`npm publish`), pushes the `vX.Y.Z` tag, and creates the GitHub Release.
+   The publish runs only after type check and tests pass in that same job.
 
-# 2) push commit + tag
-git push --follow-tags
-```
+Do not bump the version by hand (`npm version`): any push to `main` whose
+`package.json` version is not on npm yet gets published right away.
+`.github/workflows/publish.yml` stays only as a fallback for a Release created
+by hand in the GitHub UI.
 
-Then in the GitHub web UI: "Draft a new release" → pick the tag → Publish
-release. `.github/workflows/publish.yml` runs automatically through
-`npm publish --access public`. The workflow first verifies the release tag
-matches the `package.json` version and fails without publishing on a mismatch.
+**One-time prerequisite (version PR)**: repo Settings → Actions → General →
+enable "Allow GitHub Actions to create and approve pull requests".
 
 **One-time prerequisite**: repo Settings → Secrets and variables → Actions →
 register **NPM_TOKEN** with an npm token capable of 2FA bypass.
@@ -334,8 +340,8 @@ register **NPM_TOKEN** with an npm token capable of 2FA bypass.
 3. Add the `npm_…` token as the GitHub Actions secret `NPM_TOKEN`
 
 **Hardening option**: switch to npm Trusted Publishing (OIDC) and no token is needed at all.
-1. At <https://www.npmjs.com/package/@younggichoi/cliclaw/access>, add Trusted Publisher → GitHub Actions (workflow filename: `publish.yml`)
-2. In `.github/workflows/publish.yml`, add `permissions: id-token: write`, remove `NODE_AUTH_TOKEN`, add the `--provenance` flag
+1. At <https://www.npmjs.com/package/@younggichoi/cliclaw/access>, add Trusted Publisher → GitHub Actions (workflow filename: `release.yml`)
+2. In `.github/workflows/release.yml`, add `id-token: write` to `permissions` and remove `NODE_AUTH_TOKEN`; in `publish.yml`, add `permissions: id-token: write`, remove `NODE_AUTH_TOKEN`, add the `--provenance` flag
 3. Delete the old NPM_TOKEN secret
 
 ## Contributing & security

@@ -1,0 +1,86 @@
+# Changesets release automation.
+#
+# On every push to main, changesets/action checks the .changeset/ directory:
+#
+#   - If changeset files are pending, it opens/updates a "chore: version
+#     packages" PR that runs `changeset version` to bump package.json, write
+#     CHANGELOG.md, and consume the changesets.
+#   - Otherwise (e.g. right after that PR is merged) it runs
+#     `changeset publish`, which publishes package.json's version to npm if
+#     that version is not on npm yet, then pushes the `vX.Y.Z` tag and creates
+#     the matching GitHub Release. If the version is already on npm, nothing
+#     happens.
+#
+# npm publish happens HERE, not in publish.yml. The Release this workflow
+# creates uses GITHUB_TOKEN, and GitHub does not start new workflow runs for
+# events made with GITHUB_TOKEN — so publish.yml (`on: release: published`)
+# would never fire for it. publish.yml stays as the fallback for a Release a
+# maintainer creates by hand.
+#
+# Requires the repo setting "Allow GitHub Actions to create and approve pull
+# requests" (Settings → Actions → General) for the version PR.
+
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release:
+    # Same OS as test.yml: the package is macOS-only.
+    runs-on: macos-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # registry-url writes an .npmrc that reads NODE_AUTH_TOKEN, which
+      # `changeset publish` (it shells out to `npm publish`) picks up.
+      - name: Setup Node + npm registry auth
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install
+
+      # Gate the publish on the same checks as test.yml. The version PR is
+      # pushed with GITHUB_TOKEN, so test.yml never runs on it, and on merge
+      # test.yml runs in parallel with this job instead of before it.
+      - name: Prepare scratch directory
+        run: mkdir -p .claude/tmp
+
+      - name: Type check
+        run: bun --bun x tsc --noEmit
+
+      - name: Run tests
+        run: bun test
+
+      # changesets/action v2 is the line that supports @changesets/cli v3
+      # (v1 is for CLI v2).
+      - name: Version packages or publish
+        uses: changesets/action@v2
+        with:
+          publish-script: bunx changeset publish
+          commit-message: "chore: version packages"
+          pr-title: "chore: version packages"
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

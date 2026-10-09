@@ -275,18 +275,18 @@ bun run test
 
 ## 릴리스 자동화 (maintainer)
 
-새 버전 publish 흐름:
+릴리스는 [changesets](https://changesets.dev) 로 합니다:
 
-```bash
-# 1) 버전 bump (commit + tag 자동 생성)
-npm version patch          # 또는 minor / major
+1. 사용자에게 보이는 변경이 있는 PR 에서 변경 내용 기록 (patch / minor / major):
+   ```bash
+   bunx changeset
+   ```
+2. 그 PR 을 머지하면 `.github/workflows/release.yml` 이 **"chore: version packages"** PR 을 열거나 갱신합니다 (`package.json` 버전 bump + `CHANGELOG.md` 작성).
+3. version PR 을 머지하면 같은 워크플로가 `changeset publish`(`npm publish`) → `vX.Y.Z` 태그 푸시 → GitHub Release 생성까지 끝냅니다. publish 는 같은 job 에서 타입 체크와 테스트가 통과한 뒤에만 실행됩니다.
 
-# 2) commit + tag 푸시
-git push --follow-tags
-```
+버전을 손으로 올리지 마세요(`npm version`): `main` 에 push 된 `package.json` 버전이 npm 에 없으면 바로 publish 됩니다. `.github/workflows/publish.yml` 은 GitHub UI 에서 손으로 만든 Release 용 예비 경로로만 남아 있습니다.
 
-그 다음 GitHub Web UI 의 "Draft a new release" → tag 선택 → Publish release.
-`.github/workflows/publish.yml` 이 자동 실행되어 `npm publish --access public` 까지 끝냅니다. 워크플로는 release tag 이름과 `package.json` version 일치를 먼저 검증하므로, 두 값이 어긋나 있으면 publish하지 않고 fail합니다.
+**사전 설정 (version PR 용, 한 번만)**: repo Settings → Actions → General → "Allow GitHub Actions to create and approve pull requests" 켜기.
 
 **사전 등록 필요** (한 번만): repo Settings → Secrets and variables → Actions → **NPM_TOKEN** 에 2FA bypass 가능한 npm 토큰 등록.
 
@@ -295,8 +295,8 @@ git push --follow-tags
 3. 발급된 `npm_…` 토큰을 GitHub Actions secret `NPM_TOKEN` 으로 추가
 
 **보안 강화 옵션** (선택): npm Trusted Publishing(OIDC)으로 전환하면 토큰 자체가 불필요합니다.
-1. <https://www.npmjs.com/package/@younggichoi/cliclaw/access> 에서 Trusted Publisher → GitHub Actions 추가 (workflow filename: `publish.yml`)
-2. `.github/workflows/publish.yml` 에 `permissions: id-token: write` 추가 + `NODE_AUTH_TOKEN` 제거 + `--provenance` 플래그 추가
+1. <https://www.npmjs.com/package/@younggichoi/cliclaw/access> 에서 Trusted Publisher → GitHub Actions 추가 (workflow filename: `release.yml`)
+2. `.github/workflows/release.yml` 의 `permissions` 에 `id-token: write` 추가 + `NODE_AUTH_TOKEN` 제거, `publish.yml` 에도 `permissions: id-token: write` 추가 + `NODE_AUTH_TOKEN` 제거 + `--provenance` 플래그 추가
 3. 기존 NPM_TOKEN secret 삭제
 
 ## 기여 및 보안

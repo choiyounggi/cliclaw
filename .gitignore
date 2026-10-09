@@ -1,5 +1,5 @@
 # Secrets and runtime state — must never be committed.
-config.json
+/config.json
 sessions.json
 sessions/
 .sock/
