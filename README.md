@@ -313,16 +313,16 @@ Per-version changes live on [GitHub Releases](https://github.com/choiyounggi/cli
 
 Releases use [changesets](https://changesets.dev):
 
-```bash
-# 1) in the PR with a user-visible change, describe it (patch / minor / major)
-bunx changeset
-```
-
+1. In the PR with a user-visible change, describe it (patch / minor / major):
+   ```bash
+   bunx changeset
+   ```
 2. Merge that PR. `.github/workflows/release.yml` opens (or updates) a
    **"chore: version packages"** PR that bumps `package.json` and writes
    `CHANGELOG.md`.
 3. Merge the version PR. The same workflow runs `changeset publish`
    (`npm publish`), pushes the `vX.Y.Z` tag, and creates the GitHub Release.
+   The publish runs only after type check and tests pass in that same job.
 
 Do not bump the version by hand (`npm version`): any push to `main` whose
 `package.json` version is not on npm yet gets published right away.

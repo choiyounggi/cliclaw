@@ -277,13 +277,12 @@ bun run test
 
 릴리스는 [changesets](https://changesets.dev) 로 합니다:
 
-```bash
-# 1) 사용자에게 보이는 변경이 있는 PR 에서 변경 내용 기록 (patch / minor / major)
-bunx changeset
-```
-
+1. 사용자에게 보이는 변경이 있는 PR 에서 변경 내용 기록 (patch / minor / major):
+   ```bash
+   bunx changeset
+   ```
 2. 그 PR 을 머지하면 `.github/workflows/release.yml` 이 **"chore: version packages"** PR 을 열거나 갱신합니다 (`package.json` 버전 bump + `CHANGELOG.md` 작성).
-3. version PR 을 머지하면 같은 워크플로가 `changeset publish`(`npm publish`) → `vX.Y.Z` 태그 푸시 → GitHub Release 생성까지 끝냅니다.
+3. version PR 을 머지하면 같은 워크플로가 `changeset publish`(`npm publish`) → `vX.Y.Z` 태그 푸시 → GitHub Release 생성까지 끝냅니다. publish 는 같은 job 에서 타입 체크와 테스트가 통과한 뒤에만 실행됩니다.
 
 버전을 손으로 올리지 마세요(`npm version`): `main` 에 push 된 `package.json` 버전이 npm 에 없으면 바로 publish 됩니다. `.github/workflows/publish.yml` 은 GitHub UI 에서 손으로 만든 Release 용 예비 경로로만 남아 있습니다.
 

@@ -36,8 +36,9 @@ permissions:
 
 jobs:
   release:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Same OS as test.yml: the package is macOS-only.
+    runs-on: macos-latest
+    timeout-minutes: 15
 
     steps:
       - name: Checkout
@@ -60,6 +61,18 @@ jobs:
 
       - name: Install dependencies
         run: bun install
+
+      # Gate the publish on the same checks as test.yml. The version PR is
+      # pushed with GITHUB_TOKEN, so test.yml never runs on it, and on merge
+      # test.yml runs in parallel with this job instead of before it.
+      - name: Prepare scratch directory
+        run: mkdir -p .claude/tmp
+
+      - name: Type check
+        run: bun --bun x tsc --noEmit
+
+      - name: Run tests
+        run: bun test
 
       # changesets/action v2 is the line that supports @changesets/cli v3
       # (v1 is for CLI v2).
