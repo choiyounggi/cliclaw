@@ -332,17 +332,17 @@ by hand in the GitHub UI.
 **One-time prerequisite (version PR)**: repo Settings → Actions → General →
 enable "Allow GitHub Actions to create and approve pull requests".
 
-**One-time prerequisite**: repo Settings → Secrets and variables → Actions →
-register **NPM_TOKEN** with an npm token capable of 2FA bypass.
+**One-time prerequisite (npm auth)**: `release.yml` publishes with npm
+[Trusted Publishing](https://docs.npmjs.com/trusted-publishers) (OIDC), so it
+needs no token. At <https://www.npmjs.com/package/@younggichoi/cliclaw/access>
+→ Trusted Publisher → GitHub Actions, register user `choiyounggi`, repository
+`cliclaw`, workflow filename `release.yml`.
 
-1. <https://www.npmjs.com/settings/younggichoi/tokens/new>
-2. Issue a Granular Access Token or a Classic **Automation** token (with 2FA bypass)
-3. Add the `npm_…` token as the GitHub Actions secret `NPM_TOKEN`
-
-**Hardening option**: switch to npm Trusted Publishing (OIDC) and no token is needed at all.
-1. At <https://www.npmjs.com/package/@younggichoi/cliclaw/access>, add Trusted Publisher → GitHub Actions (workflow filename: `release.yml`)
-2. In `.github/workflows/release.yml`, add `id-token: write` to `permissions` and remove `NODE_AUTH_TOKEN`; in `publish.yml`, add `permissions: id-token: write`, remove `NODE_AUTH_TOKEN`, add the `--provenance` flag
-3. Delete the old NPM_TOKEN secret
+The `publish.yml` fallback still uses the **NPM_TOKEN** secret. npm write
+tokens expire after at most 90 days, so renew it before using that path:
+issue a Granular Access Token with write access and "Bypass 2FA" at
+<https://www.npmjs.com/settings/younggichoi/tokens/new>, then
+`gh secret set NPM_TOKEN`.
 
 ## Contributing & security
 
