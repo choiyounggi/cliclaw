@@ -33,6 +33,9 @@ concurrency:
 permissions:
   contents: write
   pull-requests: write
+  # npm Trusted Publishing (OIDC): `npm publish` trades this job's OIDC token
+  # for a short-lived publish credential. No NPM_TOKEN secret is used here.
+  id-token: write
 
 jobs:
   release:
@@ -46,15 +49,17 @@ jobs:
         with:
           fetch-depth: 0
 
-      # registry-url writes an .npmrc that reads NODE_AUTH_TOKEN, which
-      # `changeset publish` (it shells out to `npm publish`) picks up.
+      # Auth is npm Trusted Publishing: npmjs.com trusts this repo's
+      # release.yml, and `changeset publish` shells out to `npm publish`,
+      # which does the OIDC exchange (needs npm >= 11.5.1, Node >= 22.14).
       # @changesets/cli v3 needs Node ^22.11 || ^24 (it crashes on 20 with
       # "enableCompileCache is not a function").
-      - name: Setup Node + npm registry auth
+      # No registry-url: it would write a token-based .npmrc (with a
+      # placeholder NODE_AUTH_TOKEN) that OIDC does not need.
+      - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: "24"
-          registry-url: "https://registry.npmjs.org"
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -84,5 +89,3 @@ jobs:
           publish-script: bunx changeset publish
           commit-message: "chore: version packages"
           pr-title: "chore: version packages"
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

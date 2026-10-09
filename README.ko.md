@@ -288,16 +288,9 @@ bun run test
 
 **사전 설정 (version PR 용, 한 번만)**: repo Settings → Actions → General → "Allow GitHub Actions to create and approve pull requests" 켜기.
 
-**사전 등록 필요** (한 번만): repo Settings → Secrets and variables → Actions → **NPM_TOKEN** 에 2FA bypass 가능한 npm 토큰 등록.
+**사전 설정 (npm 인증, 한 번만)**: `release.yml` 은 npm [Trusted Publishing](https://docs.npmjs.com/trusted-publishers)(OIDC)으로 publish 하므로 토큰이 필요 없습니다. <https://www.npmjs.com/package/@younggichoi/cliclaw/access> → Trusted Publisher → GitHub Actions 에서 user `choiyounggi`, repository `cliclaw`, workflow filename `release.yml` 을 등록합니다.
 
-1. <https://www.npmjs.com/settings/younggichoi/tokens/new>
-2. Granular Access Token 또는 Classic **Automation** Token 발급 (2FA bypass 포함)
-3. 발급된 `npm_…` 토큰을 GitHub Actions secret `NPM_TOKEN` 으로 추가
-
-**보안 강화 옵션** (선택): npm Trusted Publishing(OIDC)으로 전환하면 토큰 자체가 불필요합니다.
-1. <https://www.npmjs.com/package/@younggichoi/cliclaw/access> 에서 Trusted Publisher → GitHub Actions 추가 (workflow filename: `release.yml`)
-2. `.github/workflows/release.yml` 의 `permissions` 에 `id-token: write` 추가 + `NODE_AUTH_TOKEN` 제거, `publish.yml` 에도 `permissions: id-token: write` 추가 + `NODE_AUTH_TOKEN` 제거 + `--provenance` 플래그 추가
-3. 기존 NPM_TOKEN secret 삭제
+예비 경로인 `publish.yml` 은 여전히 **NPM_TOKEN** secret 을 씁니다. npm 쓰기 토큰은 최대 90일이면 만료되므로, 그 경로를 쓰기 전에 <https://www.npmjs.com/settings/younggichoi/tokens/new> 에서 쓰기 권한 + "Bypass 2FA" Granular Access Token 을 새로 발급해 `gh secret set NPM_TOKEN` 으로 갱신하세요.
 
 ## 기여 및 보안
 
