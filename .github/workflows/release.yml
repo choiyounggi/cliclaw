@@ -48,10 +48,12 @@ jobs:
 
       # registry-url writes an .npmrc that reads NODE_AUTH_TOKEN, which
       # `changeset publish` (it shells out to `npm publish`) picks up.
+      # @changesets/cli v3 needs Node ^22.11 || ^24 (it crashes on 20 with
+      # "enableCompileCache is not a function").
       - name: Setup Node + npm registry auth
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "24"
           registry-url: "https://registry.npmjs.org"
 
       - name: Setup Bun
